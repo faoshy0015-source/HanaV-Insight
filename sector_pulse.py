@@ -168,8 +168,8 @@ def _catalog_from_tables(frames):
     if master.empty:
         return pd.DataFrame(columns=columns)
     m = master.copy()
-    m["etf_code"] = m["etf_code"].astype(str).str.strip().str.zfill(6)
-    m = m[m["etf_code"].str.fullmatch(r"\d{6}")].drop_duplicates("etf_code")
+    m["etf_code"] = m["etf_code"].astype(str).str.strip().str.upper().str.zfill(6)
+    m = m[m["etf_code"].str.fullmatch(r"[0-9A-Z]{6}")].drop_duplicates("etf_code")
     m["etf_name"] = m["etf_name"].fillna("").astype(str)
     m = m[(m["etf_name"] != "") & ~m["etf_name"].str.contains(EXCLUDED)]
     m["규모"] = pd.to_numeric(m["aum"], errors="coerce").fillna(0.0).clip(lower=0)
@@ -283,6 +283,38 @@ def _prices(codes):
     return pd.DataFrame(results, columns=["티커", "현재가(원)", "등락률(%)"])
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _live_etf_name_catalog():
+    """Fresh KRX-listed ETF names from Naver ETF listing as an optional discovery fallback."""
+    try:
+        response = requests.get(
+            "https://finance.naver.com/api/sise/etfItemList.nhn",
+            headers=QUOTE_HEADERS, timeout=(5, 14)
+        )
+        response.raise_for_status()
+        items = response.json().get("result", {}).get("etfItemList", [])
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        return pd.DataFrame(columns=["업종", "티커", "대표 ETF", "규모"])
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("itemcode") or "").strip().upper()
+        name = str(item.get("itemname") or "").strip()
+        if not re.fullmatch(r"[0-9A-Z]{6}", code) or not name:
+            continue
+        if EXCLUDED.search(name) or FOREIGN.search(name):
+            continue
+        try:
+            cap = max(0, float(item.get("marketSum") or 0))
+        except (TypeError, ValueError):
+            cap = 0
+        for theme, words in KEYWORDS.items():
+            if any(word.casefold() in name.casefold() for word in words):
+                rows.append({"업종":theme,"티커":code,"대표 ETF":name,"규모":cap})
+    return pd.DataFrame(rows, columns=["업종", "티커", "대표 ETF", "규모"])
+
+
 def get_domestic_sector_pulse():
     """Summary includes all registered themes, including no-match/no-quote themes."""
     try:
@@ -290,6 +322,16 @@ def get_domestic_sector_pulse():
     except OSError:
         token = 0
     catalog, catalog_origin = load_theme_catalog(token)
+    # Discover newly listed products without requiring an ETF database rebuild.
+    live_catalog = _live_etf_name_catalog()
+    if not live_catalog.empty:
+        if catalog.empty:
+            catalog = live_catalog.copy()
+        else:
+            catalog = pd.concat([catalog, live_catalog], ignore_index=True)
+            catalog = (catalog.sort_values("규모", ascending=False)
+                       .drop_duplicates(["업종","티커"]))
+        catalog_origin += " + 네이버 전체 ETF 목록"
     detected = set(catalog["업종"]) if not catalog.empty else set()
     theme_names = list(dict.fromkeys([*BASE_THEMES, *sorted(detected)]))
     registered = pd.DataFrame({"업종": theme_names})
