@@ -19,6 +19,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 from data_sources import SEED
+from sector_pulse import get_domestic_sector_pulse, _prices as _shared_sector_prices
 from trading_sidebar import public_market_quote
 from market_calendar import render_market_calendar
 from trading_sidebar import render_trading_sidebar
@@ -389,6 +390,7 @@ with c2:
         _market_quotes.clear()
         public_market_quote.clear()
         _today_market_news.clear()
+        _shared_sector_prices.clear()
         st.rerun()
 
 with st.spinner("주요 종목의 최신 시세 조회 중..."):
@@ -452,7 +454,122 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.subheader("🟩 업종별 주식 모멘텀 히트맵")
+st.subheader("🌐 ETF 업종 모멘텀 · 전체 테마 자동 반영")
+st.caption(
+    "ETF Finder와 동일한 국내 ETF 분류 DB·동일한 시세 기준을 사용합니다. "
+    "기존의 제한된 대표주 목록과 별도로, 등록된 전체 테마를 자동 점검합니다. "
+    "업종지수 또는 KRX 전체 업종의 수익률은 아닙니다."
+)
+etf_pulse = get_domestic_sector_pulse()
+etf_sector_all = etf_pulse["summary"]
+etf_sector_live = etf_sector_all.loc[
+    etf_sector_all["시세확인 ETF"].gt(0)
+].sort_values("등락률(%)", ascending=False).reset_index(drop=True)
+etf_sector_missing = etf_sector_all.loc[
+    etf_sector_all["시세확인 ETF"].eq(0)
+].copy()
+st.caption(
+    f"등록된 ETF 분류 {len(etf_sector_all)}개 · "
+    f"시세 확인 {len(etf_sector_live)}개 · "
+    f"확인 불가/ETF 없는 분류 {len(etf_sector_missing)}개 · "
+    + etf_pulse["source"]
+)
+if not etf_sector_missing.empty:
+    with st.expander(
+        f"⚠️ 시세 확인 불가 또는 ETF 미등록 분류 {len(etf_sector_missing)}개",
+        expanded=False,
+    ):
+        st.caption("이 목록의 업종을 0%로 처리하지 않으며, 실제 상승·하락 판단에서 제외합니다.")
+        st.dataframe(etf_sector_missing[["업종","ETF수","상태"]],
+                     hide_index=True,use_container_width=True)
+
+if not etf_sector_live.empty:
+    eb1,eb2,eb3 = st.columns(3)
+    eb1.metric("ETF 기준 최강세", str(etf_sector_live.iloc[0]["업종"]),
+               f'{float(etf_sector_live.iloc[0]["등락률(%)"]):+.2f}%')
+    eb2.metric("상승 분류", f'{int((etf_sector_live["등락률(%)"]>0).sum())}개')
+    eb3.metric("하락 분류", f'{int((etf_sector_live["등락률(%)"]<0).sum())}개')
+    etf_valid_names = set(etf_sector_live["업종"].astype(str))
+    etf_active_key = "dashboard_etf_active_theme"
+    etf_active = st.session_state.get(etf_active_key)
+    if etf_active not in etf_valid_names:
+        etf_active = None
+        st.session_state.pop(etf_active_key, None)
+    if etf_active is None:
+        st.markdown(
+            '<div class="stock-dashboard-hint">👇 <b>ETF 업종 네모칸을 클릭하세요!</b> '
+            '선택한 업종의 실제 시세 확인 ETF 상위 5개를 보여드립니다.</div>',
+            unsafe_allow_html=True,
+        )
+        ef = go.Figure(go.Treemap(
+            ids=["etfpulse/"+str(x) for x in etf_sector_live["업종"]],
+            labels=etf_sector_live["업종"].astype(str).tolist(),
+            parents=[""]*len(etf_sector_live),
+            values=(etf_sector_live["등락률(%)"].abs()+.30).tolist(),
+            text=[f"{name} ▶<br>{float(pct):+.2f}%"
+                  for name,pct in zip(etf_sector_live["업종"],etf_sector_live["등락률(%)"])],
+            textinfo="text",
+            customdata=etf_sector_live[["등락률(%)","시세확인 ETF"]].to_numpy(),
+            hovertemplate="%{label}<br>ETF 평균 %{customdata[0]:+.2f}%"
+                          "<br>시세 확인 ETF %{customdata[1]}개"
+                          "<br>클릭: ETF TOP 5<extra></extra>",
+            marker=dict(colors=[_tile_color(x) for x in etf_sector_live["등락률(%)"]],
+                        line=dict(color="#f4f8f7",width=3)),
+            tiling=dict(packing="squarify",pad=3),
+            pathbar=dict(visible=False),maxdepth=1,sort=False,
+        ))
+        ef.update_layout(margin=dict(l=0,r=0,t=1,b=0),height=410,
+                         paper_bgcolor="rgba(0,0,0,0)")
+        etf_click = st.plotly_chart(
+            ef,use_container_width=True,config={"displayModeBar":False},
+            key="stock_dashboard_etf_sector_heatmap",on_select="rerun",
+            selection_mode="points"
+        )
+        try:
+            ef_points = etf_click["selection"]["points"]
+        except (KeyError,TypeError,AttributeError):
+            ef_points = []
+        if ef_points:
+            q = ef_points[0]
+            sid = str(q.get("id") or "")
+            label = sid[len("etfpulse/"):] if sid.startswith("etfpulse/") else str(q.get("label") or "")
+            if label in etf_valid_names:
+                st.session_state[etf_active_key] = label
+                st.rerun()
+    else:
+        tx,back = st.columns([4,1],vertical_alignment="center")
+        with tx:
+            st.markdown(f"#### 🔎 {escape(etf_active)} · ETF 등락률 TOP 5")
+        with back:
+            if st.button("← 전체 업종",key="dashboard_etf_sector_back",
+                         use_container_width=True):
+                st.session_state.pop(etf_active_key,None)
+                st.rerun()
+        etf_rows = etf_pulse["instruments"]
+        if not etf_rows.empty:
+            etf_rows = (
+                etf_rows.loc[etf_rows["업종"].eq(etf_active)]
+                .dropna(subset=["등락률(%)"])
+                .sort_values("등락률(%)",ascending=False).head(5)
+            )
+            st.dataframe(
+                etf_rows[["대표 ETF","티커","현재가(원)","등락률(%)"]],
+                hide_index=True,use_container_width=True,
+                column_config={
+                    "현재가(원)":st.column_config.NumberColumn(format="%.0f"),
+                    "등락률(%)":st.column_config.NumberColumn(format="%+.2f")
+                }
+            )
+            st.page_link("etf_finder.py",label="📈 ETF Finder에서 상세 분석",
+                         use_container_width=True)
+else:
+    st.warning(
+        "ETF 업종 분류 또는 시세가 확인되지 않아 ETF 히트맵을 표시하지 않습니다. "
+        "DB 연결/시세 제공처를 확인하세요. 기존 대표주 표본 히트맵은 아래에 유지됩니다."
+    )
+
+st.divider()
+st.subheader("🟩 대표주 표본 업종 모멘텀 히트맵")
 st.caption(
     "ETF Finder의 ETF 업종 등락률과는 다른 지표입니다. "
     "이곳은 대표주 표본의 업종별 등락률 단순평균 · 녹색 상승 / 빨간색 하락 · "
