@@ -344,6 +344,7 @@ def get_domestic_sector_pulse():
                 "source": catalog_origin, "error": "ETF 분류 DB에 접근할 수 없거나 매핑된 ETF가 없습니다.",
                 "requested": 0, "retrieved": 0}
     # Top 12 per theme by observable DB scale; every theme is included.
+    catalog = catalog.sort_values(["업종", "규모"], ascending=[True, False])
     chosen = catalog.groupby("업종", group_keys=False, sort=False).head(12)
     codes = tuple(dict.fromkeys(chosen["티커"].astype(str).tolist()))
     quote_rows = _prices(codes)
