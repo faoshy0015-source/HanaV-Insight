@@ -3370,7 +3370,8 @@ def _render_sector_momentum():
                           use_container_width=True)
     if pressed:
         if market=='🇰🇷 국내':
-            _sector_kr_quotes.clear()
+            from sector_pulse import _prices as _shared_sector_prices
+            _shared_sector_prices.clear()
         else:
             _sector_us_quotes.clear()
         st.rerun()
@@ -3379,17 +3380,34 @@ def _render_sector_momentum():
         from zoneinfo import ZoneInfo
         requested_at=datetime.now(ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M:%S')
         if market=='🇰🇷 국내':
-            reps=_sector_kr_representatives(master)
-            proxies=tuple((p['업종'],p['티커'],p['대표 ETF']) for p in reps)
-            result=_sector_kr_quotes(proxies)
+            from sector_pulse import get_domestic_sector_pulse
+            full_pulse=get_domestic_sector_pulse()
+            instruments=full_pulse['instruments'].copy()
+            result={'rows':instruments,'source':full_pulse['source'],
+                    'error':full_pulse['error']}
+            if not instruments.empty:
+                instruments=instruments.dropna(subset=['등락률(%)']).copy()
         else:
             result=_sector_us_quotes()
-        instruments=result['rows'].copy()
+            instruments=result['rows'].copy()
     except Exception as exc:
         instruments=pd.DataFrame()
         result={'error':f'{type(exc).__name__}: {str(exc)[:120]}','source':'조회 실패'}
         requested_at='-'
 
+    if market=='🇰🇷 국내' and 'full_pulse' in locals():
+        missed=full_pulse['summary'].loc[
+            full_pulse['summary']['시세확인 ETF'].eq(0),
+            ['업종','ETF수','상태']
+        ]
+        st.caption(
+            f"국내 ETF 분류 {len(full_pulse['summary'])}개 자동 점검 · "
+            f"시세 확인 {len(full_pulse['summary'])-len(missed)}개 · "
+            f"미확인 {len(missed)}개 (미확인은 0%로 처리하지 않음)"
+        )
+        if not missed.empty:
+            with st.expander(f"⚠️ 시세 미확인/미등록 분류 {len(missed)}개 보기", expanded=False):
+                st.dataframe(missed, hide_index=True, use_container_width=True)
     if instruments.empty:
         st.warning('업종별 시세를 조회하지 못했습니다. '
                    +str(result.get('error') or '데이터 제공처 연결 상태를 확인하세요.'))
@@ -3418,8 +3436,10 @@ def _render_sector_momentum():
         f"업종 {len(summary)}개 / 시세 확인 ETF {instruments['티커'].nunique()}개"
     )
     if market=='🇰🇷 국내':
-        st.caption('국내: 로컬 ETF 목록에서 업종명에 해당하는 일반 ETF 전체를 찾고, '
-                   '조회에 성공한 ETF들의 전일 대비 등락률을 단순평균합니다.')
+        st.caption('국내: ETF Finder 테마 분류 DB에서 업종을 자동 구성합니다. '
+                   '규모 기준 업종별 최대 12개 비레버리지 ETF를 조회하고 '
+                   '시세 확인된 ETF의 등락률을 단순평균합니다. '
+                   '표시되지 않은 업종은 위 미확인 목록에서 확인할 수 있습니다.')
     else:
         st.caption('미국: 화면에 등록된 대표 ETF 후보의 단순평균입니다. '
                    '미국 시장 전체 업종 또는 모든 ETF를 집계한 결과는 아닙니다.')
