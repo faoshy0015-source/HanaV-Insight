@@ -206,6 +206,20 @@ def _catalog_from_tables(frames):
                                 "대표 ETF": row.etf_name, "규모": row.규모})
     if special:
         found = pd.concat([found, pd.DataFrame(special)], ignore_index=True)
+    # If the ETF master later includes classified sectors, discover them
+    # without modifying a fixed sector list.
+    domestic_classified = m[
+        m["asset_region"].fillna("").astype(str).str.contains("국내", na=False)
+        & m["asset_class"].fillna("").astype(str).str.contains("주식", na=False)
+    ]
+    extras = []
+    for row in domestic_classified.itertuples(index=False):
+        sector_name = str(row.sector or "").strip()
+        if sector_name and sector_name not in ("기타", "전체", "미분류"):
+            extras.append({"업종": sector_name, "티커": row.etf_code,
+                           "대표 ETF": row.etf_name, "규모": row.규모})
+    if extras:
+        found = pd.concat([found, pd.DataFrame(extras)], ignore_index=True)
     if found.empty:
         return pd.DataFrame(columns=columns)
     found = found.dropna(subset=["업종", "티커"]).copy()
@@ -259,6 +273,8 @@ def _prices(codes):
                 change = -abs(change)
             elif sign in ("1", "2"):
                 change = abs(change)
+            elif sign == "3" and change == 0:
+                change = 0.0
             else:
                 continue  # Do not infer direction from an ambiguous quote.
             results.append({"티커": code, "현재가(원)": price, "등락률(%)": round(change, 2)})
