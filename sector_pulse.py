@@ -30,6 +30,9 @@ BASE_THEMES = (
     "산업재·기계", "화학·소재", "운송·물류",
     "농업·식품", "친환경·ESG", "국내 대표지수",
     "배당·가치", "중소형·스타일",
+    # Sector slices from the former ETF heatmap are retained alongside all parent themes.
+    "전력기기", "방산", "조선", "자동차", "인터넷", "게임",
+    "바이오", "금융·은행", "화장품",
 )
 # Same broad vocabulary used by ETF Finder, with keywords only as a fallback
 # when the database's separate theme_map has not been built.
@@ -57,6 +60,15 @@ KEYWORDS = {
     "국내 대표지수": ("코스피", "코스닥", "KRX300"),
     "배당·가치": ("배당", "가치주", "밸류업"),
     "중소형·스타일": ("중소형", "모멘텀", "퀄리티", "성장주"),
+    "전력기기": ("전력기기", "변압기", "전력설비"),
+    "방산": ("방산", "방위산업", "K방산"),
+    "조선": ("조선", "조선기자재"),
+    "자동차": ("자동차", "완성차", "모빌리티"),
+    "인터넷": ("인터넷", "플랫폼"),
+    "게임": ("게임", "e스포츠"),
+    "바이오": ("바이오", "헬스케어"),
+    "금융·은행": ("금융", "은행"),
+    "화장품": ("화장품", "K뷰티", "K-뷰티"),
 }
 EXCLUDED = re.compile(r"인버스|레버리지|커버드콜|2X|3X|선물|채권|단기채|금리|머니마켓", re.I)
 FOREIGN = re.compile(r"미국|차이나|중국|일본|인도|베트남|유럽|나스닥|NASDAQ|S&P500|글로벌|월드|해외|독일|대만|홍콩|러셀", re.I)
@@ -157,7 +169,7 @@ def _catalog_from_tables(frames):
         return pd.DataFrame(columns=columns)
     m = master.copy()
     m["etf_code"] = m["etf_code"].astype(str).str.strip().str.zfill(6)
-    m = m[m["etf_code"].str.fullmatch(r"\\d{6}")].drop_duplicates("etf_code")
+    m = m[m["etf_code"].str.fullmatch(r"\d{6}")].drop_duplicates("etf_code")
     m["etf_name"] = m["etf_name"].fillna("").astype(str)
     m = m[(m["etf_name"] != "") & ~m["etf_name"].str.contains(EXCLUDED)]
     m["규모"] = pd.to_numeric(m["aum"], errors="coerce").fillna(0.0).clip(lower=0)
@@ -183,6 +195,17 @@ def _catalog_from_tables(frames):
                     mapping.append({"업종": theme, "티커": row.etf_code,
                                     "대표 ETF": row.etf_name, "규모": row.규모})
         found = pd.DataFrame(mapping, columns=columns)
+    # Add name-matched subthemes even when the DB contains only parent theme rows.
+    # This prevents cosmetics (a subtheme of consumer goods) from disappearing.
+    domestic = m[~m["etf_name"].str.contains(FOREIGN)].copy()
+    special = []
+    for row in domestic.itertuples(index=False):
+        for theme, words in KEYWORDS.items():
+            if any(word.casefold() in row.etf_name.casefold() for word in words):
+                special.append({"업종": theme, "티커": row.etf_code,
+                                "대표 ETF": row.etf_name, "규모": row.규모})
+    if special:
+        found = pd.concat([found, pd.DataFrame(special)], ignore_index=True)
     if found.empty:
         return pd.DataFrame(columns=columns)
     found = found.dropna(subset=["업종", "티커"]).copy()
