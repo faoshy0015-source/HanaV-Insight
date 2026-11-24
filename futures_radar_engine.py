@@ -38,6 +38,30 @@ def parse_contracts(value):
     if len(result)>12: raise ValueError("최대 12개 계약을 등록할 수 있습니다.")
     return result
 
+def load_front_contracts():
+    """KIS published master: only outright nearest-month futures, no continuous series."""
+    import io, zipfile
+    result=[]; errors=[]
+    for market,filename,types in (
+        ("F","fo_idx_code_mts",{"1","3","7","9","B"}),
+        ("JF","fo_stk_code_mts",{"1","3"}),
+    ):
+        try:
+            r=requests.get("https://new.real.download.dws.co.kr/common/master/"+filename+".mst.zip",timeout=12)
+            r.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                files=[n for n in z.namelist() if n.lower().endswith(".mst")]
+                if not files: raise ValueError("master missing")
+                raw=z.read(files[0]).decode("cp949")
+            for line in raw.splitlines():
+                fields=[f.strip() for f in line.split("|")]
+                if len(fields)!=9: continue
+                kind,code,standard,label,atm,strike,month,under_code,under_name=fields
+                if kind not in types or month!="1" or not re.fullmatch(r"[A-Za-z0-9]{5,12}",code): continue
+                result.append((market,code.upper(),label,under_name))
+        except Exception as e: errors.append(market+" 종목마스터 "+type(e).__name__)
+    return sorted(set(result),key=lambda x:(x[0],x[3],x[2])),errors
+
 def token(key,secret):
     r=requests.post(BASE+"/oauth2/tokenP",json={"grant_type":"client_credentials","appkey":key,"appsecret":secret},timeout=12)
     r.raise_for_status()
@@ -195,7 +219,7 @@ def append_history(history,s):
     return recent[-2500:]
 
 def telegram(bot,chat,event):
-    msg="HanaV Futures Radar\n"+event["title"]+"\n"+event["message"]+"\n체크: "+event["point"]+"\n"+event["time"]+"\n"+event["source"]
+    msg="HanaV Futures Radar\n"+event["title"]+"\n"+event["message"]+"\n체크: "+event["point"]+"\n"+event["time"]+"\n"+event["source"]+"\n"+event.get("link","")
     r=requests.post("https://api.telegram.org/bot"+bot+"/sendMessage",json={"chat_id":chat,"text":msg[:3800]},timeout=10)
     if not r.ok or not r.json().get("ok"): raise RuntimeError("알림 전송 실패")
 
@@ -205,7 +229,8 @@ def worker():
     contracts=parse_contracts(os.getenv("FUTURES_CONTRACTS",""))
     bot=os.getenv("RADAR_TELEGRAM_BOT_TOKEN",""); chat=os.getenv("RADAR_TELEGRAM_CHAT_ID","")
     if not all((key,secret,contracts,bot,chat)): raise SystemExit("KIS credentials, contracts and approved alert settings required")
-    access=""; issued=0; history=[]; sent={}
+    access=""; issued=0; history=[]; sent={}; last_news=0
+    alert_news=os.getenv("RADAR_ALERT_NEWS","").lower() in ("1","true","yes")
     while True:
         t=now()
         if t.weekday()<5 and 845<=t.hour*100+t.minute<=1545:
@@ -221,6 +246,13 @@ def worker():
                             if time.time()-sent.get(e["key"],0)>=600:
                                 telegram(bot,chat,e); sent[e["key"]]=time.time()
                     except Exception as e: print("contract check failed",c[1],type(e).__name__,flush=True)
+                if alert_news and time.monotonic()-last_news>=180:
+                    last_news=time.monotonic()
+                    candidates,_=news_candidates()
+                    for e in candidates[:5]:
+                        if e["key"] not in sent:
+                            telegram(bot,chat,e); sent[e["key"]]=time.time()
+                sent={k:v for k,v in sent.items() if time.time()-v<86400}
             except Exception as e: print("radar check failed",type(e).__name__,flush=True)
         time.sleep(60)
 
