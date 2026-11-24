@@ -1,10 +1,13 @@
 """HanaV Futures Radar Streamlit page (read-only)."""
 import os
+import time
+import threading
+import hashlib
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 from futures_radar_engine import (KST, now, parse_contracts, token, get_contract,
-                                  analyze, fresh, append_history, news_candidates, load_front_contracts)
+                                  analyze, fresh, append_history, news_candidates, load_front_contracts, telegram)
 from trading_sidebar import render_trading_sidebar
 
 render_trading_sidebar()
@@ -80,6 +83,44 @@ if not key or not secret:
 elif not contracts:
     st.info("감시할 실제 선물 월물코드를 등록하세요. 현재 뉴스 후보 감지는 이용할 수 있습니다.")
 st.caption("외국인·기관 선물 순매수 및 프로그램 매매는 전용 데이터 연결 대기 상태입니다. 호가나 거래량을 투자자 수급으로 대체하지 않습니다.")
+@st.cache_resource
+def alert_registry():
+    # Shared across browser sessions in this server process; resets on restart.
+    return threading.Lock(), {}
+
+def deliver(bot,chat,event,cooldown=600):
+    lock,sent=alert_registry()
+    ident=hashlib.sha256((bot+"|"+chat+"|"+event["key"]).encode()).hexdigest()
+    with lock:
+        t=time.time()
+        for k,v in list(sent.items()):
+            if t-v>86400: sent.pop(k,None)
+        if t-sent.get(ident,0)<cooldown: return "duplicate"
+        try:
+            telegram(bot,chat,event)
+        except Exception:
+            # Never show or log exception URLs, which may contain the bot token.
+            return "failed"
+        sent[ident]=t
+        return "sent"
+
+bot=setting("RADAR_TELEGRAM_BOT_TOKEN")
+chat=setting("RADAR_TELEGRAM_CHAT_ID")
+ready=bool(bot and chat)
+with st.expander("🔔 휴대폰 알림 · 텔레그램",expanded=True):
+    st.caption("본인 또는 승인된 수신자에게만 전송하세요. 시세 이용권한 및 사내 외부 메신저 사용 규정 확인 필요.")
+    st.write("설정 상태: "+("🟢 토큰·채팅 ID 등록됨 (전송 테스트 필요)" if ready else "⚪ 미설정 · Streamlit Secrets 등록 필요"))
+    alert_on=st.toggle("주요 시그널 자동 전송",value=False,disabled=not ready,key="radar_phone_on")
+    min_score=st.slider("최소 중요도",min_value=80,max_value=95,value=80,step=1,key="radar_phone_score")
+    alert_news=st.toggle("신규 주요 뉴스 후보도 전송",value=False,disabled=not ready,key="radar_phone_news")
+    st.caption("가격 신호는 동일 계약·유형별 10분 중복 제한. 뉴스는 별도 선택 시에만 전송. 이 페이지가 열린 동안 감시합니다.")
+    if st.button("📲 휴대폰 테스트 알림 보내기",disabled=not ready,key="radar_phone_test"):
+        e={"key":"manual-test","title":"알림 연결 테스트","message":"HanaV Futures Radar의 테스트 메시지입니다. 실제 시장 신호가 아닙니다.","point":"휴대폰에서 알림 수신 여부 확인","time":now().isoformat(),"source":"시스템 테스트"}
+        status=deliver(bot,chat,e,30)
+        if status=="sent": st.success("텔레그램 API 전송 성공. 휴대폰 알림을 확인하세요.")
+        elif status=="duplicate": st.info("테스트는 30초 후 다시 가능합니다.")
+        else: st.error("전송 실패: 봇 토큰, 채팅 ID, 봇 대화 시작 여부를 확인하세요.")
+
 auto=st.toggle("60초 자동 갱신 (이 페이지 열려 있을 때)",value=True,key="radar_auto")
 if st.button("🔄 최신 시세·뉴스 새로고침",key="radar_refresh"):
     collect.clear(); headlines.clear()
@@ -115,6 +156,13 @@ def monitor():
     for e in sorted(events,key=lambda x:x["score"],reverse=True):
         if t.timestamp()-seen.get(e["key"],0)>=600:
             log.append(e); seen[e["key"]]=t.timestamp()
+    if ready and alert_on:
+        results=[deliver(bot,chat,e) for e in events if e["score"]>=min_score]
+        if "failed" in results: st.warning("휴대폰 알림 전송 실패. 텔레그램 설정 및 네트워크 확인 필요.")
+        if "sent" in results:
+            st.session_state["radar_phone_last"]=now().strftime("%H:%M:%S")+" · "+str(results.count("sent"))+"건"
+        if st.session_state.get("radar_phone_last"):
+            st.caption("최근 시그널 전송 성공: "+st.session_state["radar_phone_last"])
     st.session_state["radar_history"]=history
     st.session_state["radar_log"]=log[-150:]
     st.session_state["radar_seen"]=seen
@@ -149,10 +197,18 @@ def monitor():
     st.caption(f"최근 1시간 키워드 일치 · 검색 {ok}/{len(set(queries))}건 응답 · 뉴스의 시장 영향은 원문과 시세를 대조해야 합니다.")
     if not news:
         st.info("검색된 뉴스 후보 없음" if ok else "뉴스 제공처 연결 실패")
+    if ready and alert_on and alert_news and t.weekday()<5 and 845<=t.hour*100+t.minute<=1545:
+        # Only new candidates after activation, not the pre-existing RSS backlog.
+        started=st.session_state.setdefault("radar_news_alert_start",now().timestamp())
+        candidates=[e for e in news if datetime.fromisoformat(e["time"]).timestamp()>=started]
+        results=[deliver(bot,chat,e,86400) for e in candidates[:5]]
+        if "failed" in results: st.warning("뉴스 후보 알림 전송 실패")
+    else:
+        st.session_state.pop("radar_news_alert_start",None)
     for item in news[:12]:
         st.markdown("**"+item["title"]+"**")
         st.caption(item["time"][11:19]+" · "+item["source"])
         st.link_button("기사 확인",item["link"])
-    st.caption("알림은 현재 화면 내부 감지 이력입니다. 독립 서버 및 승인된 메신저 설정 전에는 앱을 닫으면 감시가 중단됩니다.")
+    st.caption("휴대폰 알림은 텔레그램 설정 및 자동 전송 활성화 시 작동합니다. 독립 서버를 실행하지 않으면 앱을 닫을 때 감시가 중단됩니다.")
 
 monitor()
