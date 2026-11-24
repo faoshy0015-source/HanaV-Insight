@@ -78,6 +78,7 @@ def monitor():
     if key and secret and contracts:
         with st.spinner("선물 시세 확인 중..."):
             values,errors=collect(key,secret,contracts)
+    t=now()  # Evaluate freshness after the network request completes.
     history=st.session_state.get("radar_history",[])
     log=st.session_state.get("radar_log",[])
     seen=st.session_state.get("radar_seen",{})
