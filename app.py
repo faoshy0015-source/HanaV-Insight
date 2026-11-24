@@ -16,6 +16,7 @@ pages=[
     st.Page("stock_analyze.py",title="Analyze",icon="🔎",url_path="analyze"),
     st.Page("pages/0_전종목_수급_레이더.py",title="전종목 수급 레이더",icon="📡",url_path="flow-radar"),
     st.Page("pages/1_수급_전환_검색.py",title="수급전환 검색",icon="🔄",url_path="flow-reversal"),
+    st.Page("pages/3_선물_시그널_레이더.py",title="선물 시그널 레이더",icon="🚨",url_path="futures-radar"),
 ]
 page=st.navigation(pages,position="hidden")
 
@@ -126,6 +127,7 @@ with st.sidebar:
         ("stock_analyze.py","Analyze","🔎"),
         ("pages/0_전종목_수급_레이더.py","전종목 수급 레이더","📡"),
         ("pages/1_수급_전환_검색.py","수급전환 검색","🔄"),
+        ("pages/3_선물_시그널_레이더.py","선물 시그널 레이더","🚨"),
     ):
         st.page_link(path,label=title,icon=icon,use_container_width=True)
 
