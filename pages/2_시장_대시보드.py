@@ -55,12 +55,43 @@ SECTORS = {
     "게임": ("263750",),
     "화장품": ("090430", "051900", "161890", "192820"),
     "지주·복합": ("028260",),
+    "로봇": ("277810", "454910", "108490", "056080", "090360", "058610"),
+    "원전·에너지": ("052690", "051600"),
+    "건설": ("000720", "006360", "047040"),
+    "철강": ("005490", "004020", "001230"),
+    "운송·물류": ("003490", "011200", "086280"),
+    "음식료": ("097950", "004370", "271560"),
+    "통신": ("017670", "030200", "032640"),
+    "유통": ("004170", "023530", "139480"),
+    "의료기기": ("214150", "041830"),
+    "증권": ("006800", "005940", "016360"),
+    "보험": ("032830", "000810", "005830"),
 }
+# Independent sample metadata: the analyzer's small SEED is not a coverage filter.
+EXTRA_SEED = {
+    "277810": ("레인보우로보틱스", "KOSDAQ"),
+    "454910": ("두산로보틱스", "KOSPI"),
+    "108490": ("로보티즈", "KOSDAQ"),
+    "056080": ("유진로봇", "KOSDAQ"),
+    "090360": ("로보스타", "KOSDAQ"),
+    "058610": ("에스피지", "KOSDAQ"),
+    "052690": ("한전기술", "KOSPI"), "051600": ("한전KPS", "KOSPI"),
+    "000720": ("현대건설", "KOSPI"), "006360": ("GS건설", "KOSPI"), "047040": ("대우건설", "KOSPI"),
+    "005490": ("POSCO홀딩스", "KOSPI"), "004020": ("현대제철", "KOSPI"), "001230": ("동국홀딩스", "KOSPI"),
+    "003490": ("대한항공", "KOSPI"), "011200": ("HMM", "KOSPI"), "086280": ("현대글로비스", "KOSPI"),
+    "097950": ("CJ제일제당", "KOSPI"), "004370": ("농심", "KOSPI"), "271560": ("오리온", "KOSPI"),
+    "017670": ("SK텔레콤", "KOSPI"), "030200": ("KT", "KOSPI"), "032640": ("LG유플러스", "KOSPI"),
+    "004170": ("신세계", "KOSPI"), "023530": ("롯데쇼핑", "KOSPI"), "139480": ("이마트", "KOSPI"),
+    "214150": ("클래시스", "KOSDAQ"), "041830": ("인바디", "KOSDAQ"),
+    "006800": ("미래에셋증권", "KOSPI"), "005940": ("NH투자증권", "KOSPI"), "016360": ("삼성증권", "KOSPI"),
+    "032830": ("삼성생명", "KOSPI"), "000810": ("삼성화재", "KOSPI"), "005830": ("DB손해보험", "KOSPI"),
+}
+SAMPLE_METADATA = {**SEED, **EXTRA_SEED}
 BASKET = {
-    code: {"업종":sector, "종목명":SEED[code][0], "시장":SEED[code][1]}
+    code: {"업종":sector, "종목명":SAMPLE_METADATA[code][0], "시장":SAMPLE_METADATA[code][1]}
     for sector, codes in SECTORS.items()
     for code in codes
-    if code in SEED
+    if code in SAMPLE_METADATA
 }
 
 st.markdown("""
@@ -421,6 +452,21 @@ sector = (quotes.groupby("업종", as_index=False)
           .agg(평균등락률=("등락률(%)", "mean"), 종목수=("종목코드", "nunique")))
 sector["평균등락률"] = sector["평균등락률"].round(2)
 sector = sector.sort_values("평균등락률", ascending=False).reset_index(drop=True)
+expected_by_sector = {}
+for info in BASKET.values():
+    if scope == "전체" or info["시장"] == scope:
+        name = info["업종"]
+        expected_by_sector[name] = expected_by_sector.get(name, 0) + 1
+observed_by_sector = dict(zip(sector["업종"], sector["종목수"]))
+coverage_gaps = [
+    f"{name} ({observed_by_sector.get(name, 0)}/{total})"
+    for name, total in expected_by_sector.items()
+    if observed_by_sector.get(name, 0) < total
+]
+st.caption(f"대표주 업종 시세 확인: {len(observed_by_sector)}/{len(expected_by_sector)}개 업종")
+if coverage_gaps:
+    st.warning("대표주 시세 일부 또는 전체 미확인: " + " · ".join(coverage_gaps))
+
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("상승 종목", f"{count_up}개")
