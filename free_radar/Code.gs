@@ -233,7 +233,7 @@ function readFlows(c,a){
   for(const m of FLOW_MARKETS){try{flows.push(marketFlow(c,a,m));}catch(e){console.warn(m[0]+' flow unavailable');}Utilities.sleep(200);}
   return flows;
 }
-function readNasdaq(c,a){try{return nasdaqQuote(c,a);}catch(e){const msg=String(e.message||'');const safe=/^(KIS market data (rejected: [a-zA-Z0-9_-]+|HTTP \\d+|network failure|invalid JSON)|Ambiguous or missing API rows|Missing API row|NQ expiry missing or expired; update NASDAQ_FUTURES_CODE|Invalid NQ quote|Set verified KIS Nasdaq100 E-mini contract code)$/.test(msg)?msg:'unknown response issue';console.warn('Nasdaq quote unavailable: '+safe);return null;}}
+function readNasdaq(c,a){try{return nasdaqQuote(c,a);}catch(e){const msg=String(e.message||'');const safe=/^(KIS market data (rejected: [a-zA-Z0-9_-]+|HTTP \d+|network failure|invalid JSON)|Ambiguous or missing API rows|Missing API row|NQ expiry missing or expired; update NASDAQ_FUTURES_CODE|Invalid NQ quote|Set verified KIS Nasdaq100 E-mini contract code)$/.test(msg)?msg:'unknown response issue';console.warn('Nasdaq quote unavailable: '+safe);return null;}}
 function flowEvents(c,flows){
   const p=prop(),date=localTime(new Date(),'yyyyMMdd'), prior=JSON.parse(p.getProperty('_FLOW_PREV')||'{}');
   // Default only significant foreign KOSPI200 futures net-buy changes.
@@ -340,8 +340,8 @@ function renderBriefImage(quotes,flows,nq,isTest){
   }
   function txt(s,x,y,w,h,size=14,color=INK,bold=false,align='START'){
     const oid=newId();
-    requests.push({createShape:{objectId:oid,shapeType:'TEXT_BOX',elementProperties:{pageObjectId:page,size:{width:dim(w*sx),height:dim(h*sy)},transform:{scaleX:1,scaleY:1,translateX:x*sx,translateY:y*sy,unit:'PT'}}}});
-    requests.push({updateShapeProperties:{objectId:oid,shapeProperties:{contentAlignment:'MIDDLE',autofit:{autofitType:'NONE'},insetLeft:dim(0),insetRight:dim(0),insetTop:dim(0),insetBottom:dim(0)},fields:'contentAlignment,autofit,insetLeft,insetRight,insetTop,insetBottom'}});
+    requests.push({createShape:{objectId:oid,shapeType:'TEXT_BOX',elementProperties:{pageObjectId:page,size:{width:dim((w+8)*sx),height:dim((h+8)*sy)},transform:{scaleX:1,scaleY:1,translateX:(x-4)*sx,translateY:(y-4)*sy,unit:'PT'}}}});
+    requests.push({updateShapeProperties:{objectId:oid,shapeProperties:{contentAlignment:'MIDDLE',autofit:{autofitType:'NONE'},shapeBackgroundFill:{propertyState:'NOT_RENDERED'},outline:{propertyState:'NOT_RENDERED'}},fields:'contentAlignment,autofit,shapeBackgroundFill,outline'}});
     requests.push({insertText:{objectId:oid,text:String(s)}});
     requests.push({updateTextStyle:{objectId:oid,textRange:{type:'ALL'},style:{fontFamily:'Noto Sans KR',fontSize:dim(size*sf),bold,foregroundColor:{opaqueColor:rgb(color)}},fields:'fontFamily,fontSize,bold,foregroundColor'}});
     requests.push({updateParagraphStyle:{objectId:oid,textRange:{type:'ALL'},style:{alignment:align,spaceAbove:dim(0),spaceBelow:dim(0),lineSpacing:100},fields:'alignment,spaceAbove,spaceBelow,lineSpacing'}});
