@@ -50,7 +50,9 @@ function quote(c,a,contract){
   if(!(price>0))throw Error('Invalid quote');
   const rawPct=n(o.futs_prdy_ctrt), sign=String(o.prdy_vrss_sign||'');
   const dayPct=rawPct===null?null:['4','5'].includes(sign)?-Math.abs(rawPct):['1','2'].includes(sign)?Math.abs(rawPct):sign==='3'&&rawPct===0?0:null;
-  return {t:stamp,p:price,dayPct,v:n(o.acml_vol),b:market==='F'?n(o.basis):null,oi:n(o.hts_otst_stpl_qty),label:String(o.hts_kor_isnm||label)};
+  const rawDiff=n(o.futs_prdy_vrss);
+  const dayDiff=rawDiff===null?null:['4','5'].includes(sign)?-Math.abs(rawDiff):['1','2'].includes(sign)?Math.abs(rawDiff):sign==='3'&&rawDiff===0?0:null;
+  return {t:stamp,p:price,dayPct,dayDiff,v:n(o.acml_vol),b:market==='F'?n(o.basis):null,oi:n(o.hts_otst_stpl_qty),label:String(o.hts_kor_isnm||label)};
 }
 function checkContract(c,a,contract,s){
   const p=prop(), key='_H_'+contract[0]+'_'+contract[1].toUpperCase();
@@ -196,7 +198,7 @@ function nasdaqQuote(c,a){
   // Only use direction if previous close independently confirms the sign.
   const prev=marketNum(o.prev_price);
   const signed=pct===null||!(prev>0)?null:price===prev?0:Math.sign(price-prev)*Math.abs(pct);
-  return {code,price,pct:signed,stamp:String(o.proc_date||'')+' '+String(o.proc_time||''),expiry};
+  return {code,price,pct:signed,diff:prev>0?price-prev:null,stamp:String(o.proc_date||'')+' '+String(o.proc_time||''),expiry};
 }
 function signedNum(v,d=0){return v===null||!Number.isFinite(v)?'미확인':(v>0?'+':'')+v.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});}
 function currentReport(c,a,quotes,flows,nq){
@@ -231,7 +233,7 @@ function readFlows(c,a){
   for(const m of FLOW_MARKETS){try{flows.push(marketFlow(c,a,m));}catch(e){console.warn(m[0]+' flow unavailable');}Utilities.sleep(200);}
   return flows;
 }
-function readNasdaq(c,a){try{return nasdaqQuote(c,a);}catch(e){console.warn('Nasdaq quote unavailable');return null;}}
+function readNasdaq(c,a){try{return nasdaqQuote(c,a);}catch(e){const msg=String(e.message||'');const safe=/^(KIS market data (rejected: [a-zA-Z0-9_-]+|HTTP \\d+|network failure|invalid JSON)|Ambiguous or missing API rows|Missing API row|NQ expiry missing or expired; update NASDAQ_FUTURES_CODE|Invalid NQ quote|Set verified KIS Nasdaq100 E-mini contract code)$/.test(msg)?msg:'unknown response issue';console.warn('Nasdaq quote unavailable: '+safe);return null;}}
 function flowEvents(c,flows){
   const p=prop(),date=localTime(new Date(),'yyyyMMdd'), prior=JSON.parse(p.getProperty('_FLOW_PREV')||'{}');
   // Default only significant foreign KOSPI200 futures net-buy changes.
@@ -257,15 +259,199 @@ function reportDue(now){
   return prop().getProperty('_REPORT_SLOT')===slot?null:slot;
 }
 // Manually send a full snapshot to the configured owner chat only.
+
+// Private Google Slides canvas -> PNG -> Telegram. No external chart rendering.
+// Enable the Google Slides API advanced service (identifier Slides) once.
+function setupBriefCanvas(){
+  const p=prop();
+  if(p.getProperty('BRIEF_CANVAS_ID')){
+    console.log('Canvas already exists: https://docs.google.com/presentation/d/'+p.getProperty('BRIEF_CANVAS_ID')+'/edit');
+    return;
+  }
+  if(typeof Slides==='undefined')throw Error('Enable Google Slides API in Services first');
+  const deck=Slides.Presentations.create({title:'HanaV Brief Canvas (private)'});
+  const id=deck.presentationId, doc=Slides.Presentations.get(id);
+  let page;
+  if(!doc.slides||!doc.slides.length){
+    page='hanav_brief_page';
+    Slides.Presentations.batchUpdate({requests:[{createSlide:{objectId:page,slideLayoutReference:{predefinedLayout:'BLANK'}}}]},id);
+  }else{
+    page=doc.slides[0].objectId;
+    const requests=(doc.slides[0].pageElements||[]).map(e=>({deleteObject:{objectId:e.objectId}}));
+    if(requests.length)Slides.Presentations.batchUpdate({requests},id);
+  }
+  p.setProperties({BRIEF_CANVAS_ID:id,BRIEF_CANVAS_PAGE:page});
+  console.log('Private canvas: https://docs.google.com/presentation/d/'+id+'/edit');
+  console.log('File > Page setup > Custom > 8 x 10.5 inches. Save before testing.');
+}
+function briefColor(v){return v===null||!Number.isFinite(v)||v===0?'#64748B':v>0?'#CF2639':'#2056C7';}
+function rgbBrief(h){return {red:parseInt(h.slice(1,3),16)/255,green:parseInt(h.slice(3,5),16)/255,blue:parseInt(h.slice(5,7),16)/255};}
+function briefSigned(v,dec=0){return v===null||!Number.isFinite(v)?'미확인':signedNum(v,dec);}
+function briefPrice(v,dec){return v===null||!Number.isFinite(v)?'미확인':v.toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});}
+function briefHistory(row){
+  if(!row||!row.s)return [];
+  const market=row.market||(/KOSPI/i.test(row.label)?'F':'JF');
+  const state=JSON.parse(prop().getProperty('_H_'+market+'_'+row.code.toUpperCase())||'{}');
+  const cur=row.s.t;
+  const items=(state.history||[]).filter(x=>Number.isFinite(x.p)&&x.p>0&&Number.isFinite(x.t)&&x.t<=cur&&x.t>=cur-1800000);
+  items.push({t:cur,p:row.s.p});
+  return [...new Map(items.map(x=>[x.t,x])).values()].sort((a,b)=>a.t-b.t);
+}
+function briefSummary(quotes,flows,nq){
+  const f=flows.find(x=>x.id==='F001'), cash=flows.find(x=>x.id==='0001');
+  const direction=v=>v>0?'순매수':v<0?'순매도':'보합';
+  const lines=[];
+  if(f&&cash)lines.push('외국인: 현물 '+direction(cash.amount[0])+' · 지수선물 '+direction(f.q[0]));
+  else if(f)lines.push('외국인 지수선물 '+direction(f.q[0])+' '+briefSigned(f.q[0])+'계약');
+  else lines.push('외국인 지수선물 수급 미확인');
+  const chip=quotes.filter(r=>/삼성전자|SK하이닉스/i.test(r.label)&&r.s&&Number.isFinite(r.s.dayPct));
+  if(chip.length)lines.push(chip.map(r=>r.label.replace(/\s*선물.*/,'')+' '+briefSigned(r.s.dayPct,2)+'%').join('  /  '));
+  else lines.push('반도체 선물 등락률 미확인');
+  if(nq&&Number.isFinite(nq.pct))lines.push('나스닥100 선물 '+briefSigned(nq.pct,2)+'% · 지연 여부 미확인');
+  else lines.push('나스닥100 선물 시세 미확인');
+  return lines;
+}
+function renderBriefImage(quotes,flows,nq,isTest){
+  const p=prop(), id=p.getProperty('BRIEF_CANVAS_ID'), page=p.getProperty('BRIEF_CANVAS_PAGE');
+  if(!id||!page||typeof Slides==='undefined')throw Error('Run setupBriefCanvas and enable Google Slides API');
+  const doc=Slides.Presentations.get(id);
+  if(doc.title!=='HanaV Brief Canvas (private)'||!doc.slides||doc.slides.length!==1||doc.slides[0].objectId!==page)throw Error('Use only dedicated one-slide HanaV canvas');
+  const W=doc.pageSize.width.magnitude,H=doc.pageSize.height.magnitude;
+  if(doc.pageSize.width.unit!=='PT'||doc.pageSize.height.unit!=='PT'||W/H<0.70||W/H>0.82)throw Error('Canvas page setup must be portrait 8 x 10.5 inches');
+  const sx=W/600,sy=H/788,sf=Math.min(sx,sy);
+  const now=new Date(), tag='hb_'+Date.now().toString(36)+'_',requests=[];
+  let seq=0;
+  for(const e of doc.slides[0].pageElements||[]){
+    if(!/^hb_/.test(e.objectId))throw Error('Canvas contains non-HanaV elements; use dedicated blank page');
+    requests.push({deleteObject:{objectId:e.objectId}});
+  }
+  const newId=()=>tag+(++seq);
+  const dim=m=>({magnitude:m,unit:'PT'});
+  const rgb=h=>({rgbColor:rgbBrief(h)});
+  const NAVY='#102D4F',INK='#172638',TEAL='#087C78',MUTED='#64748B',BORDER='#DCE4ED';
+  requests.push({updatePageProperties:{objectId:page,pageProperties:{pageBackgroundFill:{solidFill:{color:rgb('#FFFFFF'),alpha:1}}},fields:'pageBackgroundFill'}});
+  function box(x,y,w,h,fill,outline=null,angle=0){
+    const oid=newId(),co=Math.cos(angle),si=Math.sin(angle);
+    requests.push({createShape:{objectId:oid,shapeType:'RECTANGLE',elementProperties:{pageObjectId:page,size:{width:dim(w*sx),height:dim(h*sy)},transform:{scaleX:co,scaleY:co,shearX:-si* sx/sy,shearY:si*sy/sx,translateX:x*sx,translateY:y*sy,unit:'PT'}}}});
+    const shapeProperties={shapeBackgroundFill:{solidFill:{color:rgb(fill),alpha:1}},outline:outline?{solidFill:{color:rgb(outline),alpha:1},weight:dim(0.8*sf),dashStyle:'SOLID'}:{propertyState:'NOT_RENDERED'}};
+    requests.push({updateShapeProperties:{objectId:oid,shapeProperties,fields:'shapeBackgroundFill,outline'}});
+    return oid;
+  }
+  function txt(s,x,y,w,h,size=14,color=INK,bold=false,align='START'){
+    const oid=newId();
+    requests.push({createShape:{objectId:oid,shapeType:'TEXT_BOX',elementProperties:{pageObjectId:page,size:{width:dim(w*sx),height:dim(h*sy)},transform:{scaleX:1,scaleY:1,translateX:x*sx,translateY:y*sy,unit:'PT'}}}});
+    requests.push({updateShapeProperties:{objectId:oid,shapeProperties:{contentAlignment:'MIDDLE',autofit:{autofitType:'NONE'},insetLeft:dim(0),insetRight:dim(0),insetTop:dim(0),insetBottom:dim(0)},fields:'contentAlignment,autofit,insetLeft,insetRight,insetTop,insetBottom'}});
+    requests.push({insertText:{objectId:oid,text:String(s)}});
+    requests.push({updateTextStyle:{objectId:oid,textRange:{type:'ALL'},style:{fontFamily:'Noto Sans KR',fontSize:dim(size*sf),bold,foregroundColor:{opaqueColor:rgb(color)}},fields:'fontFamily,fontSize,bold,foregroundColor'}});
+    requests.push({updateParagraphStyle:{objectId:oid,textRange:{type:'ALL'},style:{alignment:align,spaceAbove:dim(0),spaceBelow:dim(0),lineSpacing:100},fields:'alignment,spaceAbove,spaceBelow,lineSpacing'}});
+  }
+  function line(x1,y1,x2,y2,color){
+    const dx=x2-x1,dy=y2-y1,len=Math.hypot(dx,dy);
+    if(len>0.01)box(x1,y1,len,1.7,color,null,Math.atan2(dy,dx));
+  }
+  function spark(points,x,y,w,h){
+    if(points.length<3){txt('추세 데이터 대기',x,y,w,h,9,MUTED,false,'CENTER');return;}
+    const lo=Math.min(...points.map(v=>v.p)),hi=Math.max(...points.map(v=>v.p));
+    const last=points[points.length-1],first=points[0], span=last.t-first.t;
+    if(span<=0){txt('추세 데이터 대기',x,y,w,h,9,MUTED,false,'CENTER');return;}
+    const color=briefColor(last.p-first.p);
+    const coords=points.map(v=>[x+w*(v.t-first.t)/span,y+h*(hi===lo?0.5:1-(v.p-lo)/(hi-lo))]);
+    for(let i=1;i<coords.length;i++)if(points[i].t-points[i-1].t<=8*60000)line(...coords[i-1],...coords[i],color);
+    txt('최근 '+Math.round(span/60000)+'분 · '+points.length+'회',x,y+h+3,w,14,8.5,MUTED,false,'CENTER');
+  }
+  box(0,0,600,96,NAVY);box(21,20,5,54,'#1CD7BF');
+  txt('HanaV Futures Brief',36,12,360,23,15,'#BDEAE5',true);
+  txt('장중 선물·수급 브리핑',36,34,525,38,27,'#FFFFFF',true);
+  txt((isTest?'연동 테스트  |  ':'')+localTime(now,'yyyy.MM.dd HH:mm:ss')+' KST 조회',36,72,530,18,11,'#DDEAF3');
+  txt('01   주요 선물 시세',23,106,550,27,19,NAVY,true);
+  const wanted=[
+    {label:'KOSPI200 선물',row:quotes.find(r=>/KOSPI\s*200/i.test(r.label)),dec:2},
+    {label:'삼성전자 선물',row:quotes.find(r=>/삼성전자/.test(r.label)),dec:0},
+    {label:'SK하이닉스 선물',row:quotes.find(r=>/SK하이닉스/i.test(r.label)),dec:0},
+    {label:'나스닥100 선물',row:null,dec:2,overseas:true}
+  ];
+  wanted.forEach((m,i)=>{
+    const x=23+(i%2)*282,y=140+Math.floor(i/2)*112,w=272,h=102;
+    box(x,y,w,h,'#F8FAFC',BORDER);
+    txt(m.label,x+12,y+8,w-24,19,15,NAVY,true);
+    const s=m.overseas?nq:m.row&&m.row.s;
+    const price=s?(m.overseas?s.price:s.p):null,pct=s?(m.overseas?s.pct:s.dayPct):null;
+    const change=s?(m.overseas?s.diff:s.dayDiff):null;
+    txt(briefPrice(price,m.dec),x+12,y+28,164,34,price===null?19:25,INK,true);
+    txt((Number.isFinite(change)?briefSigned(change,m.dec)+'  ':'')+(Number.isFinite(pct)?'('+briefSigned(pct,2)+'%)':'등락률 미확인'),x+12,y+62,w-24,19,13,briefColor(pct),true);
+    if(m.overseas){
+      txt(s?'처리 '+String(s.stamp).replace(/[^0-9 :\-]/g,'').slice(0,22)+' · 지연 미확인':'KIS 해외선물 조회 실패',x+12,y+82,w-24,15,9,MUTED);
+    }else{
+      if(s)spark(briefHistory(m.row),x+181,y+30,79,26);
+      txt(s?m.row.code+'  |  '+localTime(new Date(s.t),'HH:mm:ss'):'시세 조회 실패',x+12,y+82,w-24,15,9,MUTED);
+    }
+  });
+  txt('02   투자주체별 당일 순매수',23,364,550,28,19,NAVY,true);
+  const divisor=marketNum(p.getProperty('FLOW_AMOUNT_DIVISOR')), amountVerified=Number.isFinite(divisor)&&divisor>0;
+  const xs=[23,202,327,452],ws=[179,125,125,125],top=400,rh=39;
+  ['구분','외국인','기관','개인'].forEach((label,i)=>{box(xs[i],top,ws[i],34,NAVY);txt(label,xs[i]+4,top+4,ws[i]-8,26,15,'#FFFFFF',true,'CENTER');});
+  FLOW_MARKETS.forEach((m,i)=>{
+    const y=top+34+i*rh,f=flows.find(v=>v.id===m[2]),cash=m[2]==='0001';
+    const name=cash?'코스피 현물':m[2]==='F001'?'코스피200 선물':m[0];
+    const unit=cash?(amountVerified?'억원':'API 원값*'):'계약';
+    box(xs[0],y,ws[0],rh,i%2?'#F2F6FA':'#F8FAFC',BORDER);
+    txt(name,xs[0]+9,y+3,ws[0]-18,20,13.5,INK,true);
+    txt(unit,xs[0]+9,y+22,ws[0]-18,13,9,MUTED);
+    for(let j=0;j<3;j++){
+      const val=f?(cash?(amountVerified?f.amount[j]/divisor:f.amount[j]):f.q[j]):null;
+      box(xs[j+1],y,ws[j+1],rh,i%2?'#F2F6FA':'#FFFFFF',BORDER);
+      const value=briefSigned(val,cash&&amountVerified?1:0);
+      txt(value,xs[j+1]+3,y+4,ws[j+1]-6,rh-8,value.length>12?10.5:value.length>9?13:17,briefColor(val),true,'END');
+    }
+  });
+  txt('03   핵심 시황',23,638,554,25,19,NAVY,true);
+  box(23,668,554,69,'#E8F5F3');
+  briefSummary(quotes,flows,nq).forEach((s,i)=>{box(34,679+i*19,5,5,TEAL);txt(s,48,671+i*19,515,19,12,INK,true);});
+  txt('출처: KIS Open API  |  수급 집계 기준시각 미제공 · 조회값 기준',23,744,554,16,10,MUTED);
+  txt(amountVerified?'장중 수치는 변동 가능 · 투자자별 포지션 추정 아님':'* 현물 금액 단위 미검증 · API 원값 표시 · 시세 지연 가능',23,761,554,15,9,MUTED);
+  Slides.Presentations.batchUpdate({requests},id);
+  const thumbnail=Slides.Presentations.Pages.getThumbnail(id,page,{'thumbnailProperties.mimeType':'PNG','thumbnailProperties.thumbnailSize':'LARGE'});
+  if(!thumbnail.contentUrl)throw Error('Brief thumbnail missing');
+  const image=UrlFetchApp.fetch(thumbnail.contentUrl,{muteHttpExceptions:true});
+  if(image.getResponseCode()!==200)throw Error('Brief thumbnail fetch failed');
+  const blob=image.getBlob();
+  if(!/^image\/png/i.test(blob.getContentType()))throw Error('Brief thumbnail is not PNG');
+  return blob.setName('HanaV_Futures_Brief.png');
+}
+function sendBriefImage(c,quotes,flows,nq,isTest){
+  const photo=renderBriefImage(quotes,flows,nq,isTest);
+  let res;
+  try{
+    res=UrlFetchApp.fetch('https://api.telegram.org/bot'+c.RADAR_TELEGRAM_BOT_TOKEN+'/sendPhoto',{method:'post',payload:{chat_id:c.RADAR_TELEGRAM_CHAT_ID,photo,caption:(isTest?'[연동 테스트] ':'')+'HanaV 장중 선물·수급 브리핑 | '+localTime(new Date(),'MM/dd HH:mm')+' KST'},muteHttpExceptions:true});
+  }catch(e){throw Error('Telegram image network failure');}
+  if(res.getResponseCode()!==200)throw Error('Telegram image HTTP '+res.getResponseCode());
+  let body;try{body=JSON.parse(res.getContentText());}catch(e){throw Error('Telegram image response invalid');}
+  if(!body.ok)throw Error('Telegram image rejected');
+}
+// Enable only after testMarketBrief successfully sends an image.
+function enableMarketBrief(){
+  const p=prop();
+  if(!p.getProperty('BRIEF_CANVAS_ID')||p.getProperty('_BRIEF_IMAGE_TEST_OK')!=='true')throw Error('Complete image test first');
+  p.setProperty('MARKET_BRIEF_ENABLED','true');
+  console.log('30-minute image briefing enabled; existing radar trigger unchanged');
+}
+function disableMarketBrief(){
+  prop().setProperty('MARKET_BRIEF_ENABLED','false');
+  console.log('Periodic image briefing disabled; radar stays active');
+}
+
 function testMarketBrief(){
   if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))throw Error('Radar is already running; retry');
   try{
     const c=cfg(),a=access(c),contracts=frontContracts(c);
-    const quotes=contracts.map(x=>{let s=null;try{s=quote(c,a,x);}catch(e){console.warn(x[2]+' quote unavailable');}return {label:x[2],code:x[1],s};});
+    const quotes=contracts.map(x=>{let s=null;try{s=quote(c,a,x);}catch(e){console.warn(x[2]+' quote unavailable');}return {market:x[0],label:x[2],code:x[1],s};});
     const flows=readFlows(c,a),nq=readNasdaq(c,a);
     console.log('Verified responses: domestic '+quotes.filter(x=>x.s).length+'/'+quotes.length+', investor flows '+flows.length+'/5, Nasdaq '+(nq?'1/1':'0/1'));
-    telegram(c,'[연동 테스트 · 개인 확인용]\n'+currentReport(c,a,quotes,flows,nq));
+    prop().deleteProperty('_BRIEF_IMAGE_TEST_OK');
+    sendBriefImage(c,quotes,flows,nq,true);
+    prop().setProperty('_BRIEF_IMAGE_TEST_OK','true');
+    console.log('Telegram briefing PNG delivered');
   }finally{lock.releaseLock();}
 }
 
@@ -277,7 +463,7 @@ function radarTick(){
     for(const contract of contracts){
       let s=null;
       try{s=quote(c,a,contract);ok++;}catch(e){failed++;console.warn('Contract check failed (no secret values logged)');}
-      quotes.push({label:contract[2],code:contract[1],s});
+      quotes.push({market:contract[0],label:contract[2],code:contract[1],s});
       if(s)try{checkContract(c,a,contract,s);}catch(e){console.warn('Contract event delivery failed');}
       Utilities.sleep(200);
     }
@@ -285,7 +471,7 @@ function radarTick(){
       const flows=readFlows(c,a);
       try{flowEvents(c,flows);}catch(e){console.warn('Flow event delivery failed');}
       const slot=reportDue(new Date());
-      if(slot){const nq=readNasdaq(c,a);telegram(c,currentReport(c,a,quotes,flows,nq));prop().setProperty('_REPORT_SLOT',slot);}
+      if(slot){const nq=readNasdaq(c,a);try{sendBriefImage(c,quotes,flows,nq,false);}catch(e){console.warn('Image unavailable; delivering text fallback');telegram(c,'[이미지 생성 실패 · 텍스트 대체]\n'+currentReport(c,a,quotes,flows,nq));}prop().setProperty('_REPORT_SLOT',slot);}
     }
     if(c.news)try{news(c);}catch(e){console.warn('News check failed');}
     console.log('Radar: '+ok+' fresh quotes; '+failed+' failed');
