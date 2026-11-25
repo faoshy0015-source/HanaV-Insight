@@ -2,7 +2,7 @@ services:
   - type: worker
     name: hanav-futures-radar
     runtime: python
-    plan: starter
+    plan: 0.5c-512mb
     numInstances: 1
     buildCommand: pip install 'requests>=2.31,<3'
     startCommand: python -u futures_radar_engine.py
