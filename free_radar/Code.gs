@@ -211,11 +211,40 @@ function flowAmountConfig(){
   // Use the conventional million-KRW scale provisionally, visibly mark it until HTS verified.
   return Number.isFinite(divisor)&&divisor>0?{divisor,verified:true}:{divisor:100,verified:false};
 }
+// Official KIS FFCODE_TBL: 223 bytes, including a 50-byte Korean name.
+// Parse ASCII fields from bytes, never from decoded Korean character offsets.
+function parseNqMaster(bytes){
+  const rows=[];let from=0;
+  function field(line,a,b){return String.fromCharCode(...line.slice(a,b).map(x=>x&255)).trim();}
+  for(let i=0;i<=bytes.length;i++){
+    if(i<bytes.length&&(bytes[i]&255)!==10)continue;
+    let line=bytes.slice(from,i);from=i+1;
+    if(line.length&&(line[line.length-1]&255)===13)line=line.slice(0,-1);
+    if(line.length!==223)continue;
+    const code=field(line,0,32),exchange=field(line,132,142),product=field(line,142,152);
+    if(!/^NQ[HMUZ]\d{2}$/.test(code)||product!=='NQ')continue;
+    const calc=marketNum(field(line,160,165)),front=field(line,218,219),spread=field(line,219,220),active=field(line,217,218);
+    if(!Number.isInteger(calc)||calc< -6||calc>3||spread==='1'||spread==='Y')continue;
+    rows.push({code,exchange,product,calc,front,active,spread});
+  }
+  return rows;
+}
+function nqApproxExpiry(code){
+  const month={H:2,M:5,U:8,Z:11}[code[2]],year=2000+Number(code.slice(3));
+  const first=new Date(Date.UTC(year,month,1)).getUTCDay(),day=1+(5-first+7)%7+14;
+  return String(year)+String(month+1).padStart(2,'0')+String(day).padStart(2,'0');
+}
+function chooseNqMaster(rows,override,date){
+  const live=[...new Map(rows.filter(x=>nqApproxExpiry(x.code)>=date).map(x=>[x.code,x])).values()].sort((a,b)=>nqApproxExpiry(a.code).localeCompare(nqApproxExpiry(b.code)));
+  if(override)return live.find(x=>x.code===override)||null;
+  const near=live.filter(x=>x.front==='1');
+  return near.length===1?near[0]:live[0]||null;
+}
 function nasdaqMaster(){
   const p=prop(),date=localTime(new Date(),'yyyyMMdd');
   const override=(p.getProperty('NASDAQ_FUTURES_CODE')||'').trim().toUpperCase();
   if(override&&!/^NQ[HMUZ]\d{2}$/.test(override))throw Error('NQ master: invalid override');
-  const cache=JSON.parse(p.getProperty('_NQ_MASTER_R5')||'null');
+  const cache=JSON.parse(p.getProperty('_NQ_MASTER_R6')||'null');
   if(cache&&cache.date===date&&cache.override===override)return cache.row;
   const url='https://new.real.download.dws.co.kr/common/master/ffcode.mst.zip';
   let res;try{res=UrlFetchApp.fetch(url,{muteHttpExceptions:true});}catch(e){throw Error('NQ master: network failure');}
@@ -223,15 +252,11 @@ function nasdaqMaster(){
   const files=Utilities.unzip(res.getBlob().setContentType('application/zip'));
   const file=files.find(x=>/ffcode\.mst$/i.test(x.getName()));
   if(!file)throw Error('NQ master: file missing');
-  let str;try{str=file.getDataAsString('MS949');}catch(e){str=file.getDataAsString('EUC-KR');}
-  const rows=str.split(/\r?\n/).filter(l=>l.length>100).map(l=>({
-    code:l.slice(0,32).trim(),exchange:l.slice(-92,-82).trim(),product:l.slice(-82,-72).trim(),
-    calc:marketNum(l.slice(-64,-59)),front:l.slice(-6,-5).trim(),spread:l.slice(-5,-4).trim()
-  })).filter(x=>/^NQ[HMUZ]\d{2}$/.test(x.code)&&x.product==='NQ'&&Number.isInteger(x.calc)&&x.calc>=-6&&x.calc<=3);
-  const matches=rows.filter(x=>override?x.code===override:x.front==='1');
-  const unique=[...new Map(matches.map(x=>[x.code,x])).values()];
-  if(unique.length!==1)throw Error('NQ master: no unique front contract');
-  const row=unique[0];p.setProperty('_NQ_MASTER_R5',JSON.stringify({date,override,row}));
+  const rows=parseNqMaster(file.getBytes());
+  console.log('NQ master candidates: '+(rows.map(x=>x.code+' near='+x.front+' scale='+x.calc).join('; ')||'none'));
+  const row=chooseNqMaster(rows,override,date);
+  if(!row)throw Error('NQ master: no unique front contract');
+  p.setProperty('_NQ_MASTER_R6',JSON.stringify({date,override,row}));
   console.log('NQ master verified: '+row.code+' / '+row.exchange+' / scale '+row.calc);
   return row;
 }
@@ -488,7 +513,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
     let detail='';try{detail=String(JSON.parse(result.getContentText()).error.message||'').slice(0,350);}catch(e){}
     throw Error('Slides batch HTTP '+result.getResponseCode()+': '+detail);
   }
-  console.log('R5: Slides drawing complete');
+  console.log('R6: Slides drawing complete');
   const thumbnail=Slides.Presentations.Pages.getThumbnail(id,page,{'thumbnailProperties.mimeType':'PNG','thumbnailProperties.thumbnailSize':'LARGE'});
   if(!thumbnail.contentUrl)throw Error('Brief thumbnail missing');
   const image=UrlFetchApp.fetch(thumbnail.contentUrl,{muteHttpExceptions:true});
@@ -502,7 +527,7 @@ function sendBriefImage(c,quotes,flows,nq,isTest){
   const photo=renderBriefImage(quotes,flows,nq,isTest);
   let res;
   try{
-    res=UrlFetchApp.fetch('https://api.telegram.org/bot'+c.RADAR_TELEGRAM_BOT_TOKEN+'/sendPhoto',{method:'post',payload:{chat_id:c.RADAR_TELEGRAM_CHAT_ID,photo,caption:(isTest?'[연동 테스트] ':'')+'HanaV 장중 선물·수급 브리핑 | '+localTime(new Date(),'MM/dd HH:mm')+' KST'},muteHttpExceptions:true});
+    res=UrlFetchApp.fetch('https://api.telegram.org/bot'+c.RADAR_TELEGRAM_BOT_TOKEN+'/sendPhoto',{method:'post',payload:{chat_id:c.RADAR_TELEGRAM_CHAT_ID,photo,caption:(isTest?'[연동 테스트] ':'')+'HanaV 장중 선물·수급 브리핑 | '+localTime(new Date(),'MM/dd HH:mm')+' KST'+(nq?'':'\n나스닥 선물 지연시세 직접 확인: https://www.cmegroup.com/markets/equities/nasdaq/e-mini-nasdaq-100.quotes.html')},muteHttpExceptions:true});
   }catch(e){throw Error('Telegram image network failure');}
   if(res.getResponseCode()!==200)throw Error('Telegram image HTTP '+res.getResponseCode());
   let body;try{body=JSON.parse(res.getContentText());}catch(e){throw Error('Telegram image response invalid');}
@@ -521,7 +546,7 @@ function disableMarketBrief(){
 }
 
 function testMarketBrief(){
-  console.log('HanaV image build: 2026-11-25-R5');
+  console.log('HanaV image build: 2026-11-25-R6');
   if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))throw Error('Radar is already running; retry');
   try{
