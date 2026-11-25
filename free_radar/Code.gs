@@ -9,6 +9,9 @@ function cfg(){
   c.contracts=c.FUTURES_CONTRACTS.split(/[;\r\n]+/).filter(x=>x.trim()).map(x=>x.split(',').map(y=>y.trim()));
   if(c.contracts.length>12||c.contracts.some(x=>x.length!==3||!['F','JF'].includes(x[0])||!/^[A-Za-z0-9]{5,12}$/.test(x[1])||!x[2]))throw Error('Invalid FUTURES_CONTRACTS');
   c.contracts=[...new Map(c.contracts.map(x=>[x[0]+':'+x[1].toUpperCase(),x])).values()];
+  // Hyundai Motor is excluded from this customer's contract radar even if the old property remains.
+  c.contracts=c.contracts.filter(([market,code,label])=>market!=='JF'||(code.toUpperCase()!=='A16612'&&!/^(현대차|현대자동차|HYUNDAIMOTOR)/i.test(label.replace(/\s+/g,''))));
+  if(!c.contracts.length)throw Error('No monitored contracts remain');
   c.news=(p.getProperty('RADAR_ALERT_NEWS')||'true').toLowerCase()==='true';
   return c;
 }
