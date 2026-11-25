@@ -172,8 +172,13 @@ const FLOW_PEOPLE=[['외국인','frgn'],['기관','orgn'],['개인','prsn']];
 function marketNum(x){if(x===null||x===undefined||String(x).trim()==='')return null;const n=Number(String(x).replace(/,/g,''));return Number.isFinite(n)?n:null;}
 function kisMarketGet(c,a,path,tr,params){
   const query=Object.keys(params).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
-  const j=req(BASE+path+'?'+query,{headers:{authorization:'Bearer '+a,appkey:c.KIS_APP_KEY,appsecret:c.KIS_APP_SECRET,tr_id:tr,custtype:'P'}},'KIS market data');
-  if(String(j.rt_cd)!=='0')throw Error('KIS market data rejected: '+String(j.msg_cd||'unknown').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,24));
+  let res;
+  try{res=UrlFetchApp.fetch(BASE+path+'?'+query,{headers:{authorization:'Bearer '+a,appkey:c.KIS_APP_KEY,appsecret:c.KIS_APP_SECRET,tr_id:tr,custtype:'P','content-type':'application/json; charset=utf-8',tr_cont:''},muteHttpExceptions:true,followRedirects:false});}catch(e){throw Error('KIS market data network failure');}
+  let j;try{j=JSON.parse(res.getContentText());}catch(e){}
+  const msg=String(j&&j.msg_cd||'unknown').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,24);
+  if(res.getResponseCode()!==200)throw Error('KIS market data HTTP '+res.getResponseCode()+' code '+msg);
+  if(!j)throw Error('KIS market data invalid JSON');
+  if(String(j.rt_cd)!=='0')throw Error('KIS market data rejected: '+msg);
   return j;
 }
 function onlyRow(value){
@@ -181,35 +186,74 @@ function onlyRow(value){
   if(!value||typeof value!=='object')throw Error('Missing API row');
   return value;
 }
+// HTS 0403 net amounts and net quantities must not be mixed.
+function flowFields(o,prefix,isCash){
+  const key=prefix+(isCash?'_ntby_tr_pbmn':'_ntby_qty');
+  const buy=marketNum(o[prefix+(isCash?'_shnu_tr_pbmn':'_shnu_vol')]);
+  const sell=marketNum(o[prefix+(isCash?'_seln_tr_pbmn':'_seln_vol')]);
+  const raw=marketNum(o[key]), tolerance=isCash?1:0;
+  const valid=raw!==null&&(isCash||Number.isInteger(raw))&&
+    (buy===null||sell===null||Math.abs(raw-(buy-sell))<=tolerance);
+  return {raw,buy,sell,value:valid?raw:null};
+}
 function marketFlow(c,a,m){
   const j=kisMarketGet(c,a,'/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market','FHPTJ04030000',{FID_INPUT_ISCD:m[1],FID_INPUT_ISCD_2:m[2]});
   const o=onlyRow(j.output);
-  const q=FLOW_PEOPLE.map(x=>marketNum(o[x[1]+'_ntby_qty']));
-  const amount=FLOW_PEOPLE.map(x=>marketNum(o[x[1]+'_ntby_tr_pbmn']));
-  if(q.some(x=>x===null)||amount.some(x=>x===null))throw Error('Incomplete net-buy fields');
-  return {name:m[0],id:m[2],q,amount,at:Date.now()};
+  const qty=FLOW_PEOPLE.map(x=>flowFields(o,x[1],false)), money=FLOW_PEOPLE.map(x=>flowFields(o,x[1],true));
+  const q=qty.map(x=>x.value),amount=money.map(x=>x.value);
+  const relevant=m[2]==='0001'?amount:q;
+  if(relevant.every(x=>x===null))throw Error('Incomplete or inconsistent net-buy fields');
+  return {name:m[0],id:m[2],q,amount,at:Date.now(),audit:m[2]==='0001'?money:qty};
+}
+function flowAmountConfig(){
+  const divisor=marketNum(prop().getProperty('FLOW_AMOUNT_DIVISOR'));
+  // KIS 0403's public field description does not explicitly declare the monetary scale.
+  // Use the conventional million-KRW scale provisionally, visibly mark it until HTS verified.
+  return Number.isFinite(divisor)&&divisor>0?{divisor,verified:true}:{divisor:100,verified:false};
+}
+function nasdaqMaster(){
+  const p=prop(),date=localTime(new Date(),'yyyyMMdd');
+  const override=(p.getProperty('NASDAQ_FUTURES_CODE')||'').trim().toUpperCase();
+  if(override&&!/^NQ[HMUZ]\d{2}$/.test(override))throw Error('NQ master: invalid override');
+  const cache=JSON.parse(p.getProperty('_NQ_MASTER_R5')||'null');
+  if(cache&&cache.date===date&&cache.override===override)return cache.row;
+  const url='https://new.real.download.dws.co.kr/common/master/ffcode.mst.zip';
+  let res;try{res=UrlFetchApp.fetch(url,{muteHttpExceptions:true});}catch(e){throw Error('NQ master: network failure');}
+  if(res.getResponseCode()!==200)throw Error('NQ master: HTTP '+res.getResponseCode());
+  const files=Utilities.unzip(res.getBlob().setContentType('application/zip'));
+  const file=files.find(x=>/ffcode\.mst$/i.test(x.getName()));
+  if(!file)throw Error('NQ master: file missing');
+  let str;try{str=file.getDataAsString('MS949');}catch(e){str=file.getDataAsString('EUC-KR');}
+  const rows=str.split(/\r?\n/).filter(l=>l.length>100).map(l=>({
+    code:l.slice(0,32).trim(),exchange:l.slice(-92,-82).trim(),product:l.slice(-82,-72).trim(),
+    calc:marketNum(l.slice(-64,-59)),front:l.slice(-6,-5).trim(),spread:l.slice(-5,-4).trim()
+  })).filter(x=>/^NQ[HMUZ]\d{2}$/.test(x.code)&&x.product==='NQ'&&Number.isInteger(x.calc)&&x.calc>=-6&&x.calc<=3);
+  const matches=rows.filter(x=>override?x.code===override:x.front==='1');
+  const unique=[...new Map(matches.map(x=>[x.code,x])).values()];
+  if(unique.length!==1)throw Error('NQ master: no unique front contract');
+  const row=unique[0];p.setProperty('_NQ_MASTER_R5',JSON.stringify({date,override,row}));
+  console.log('NQ master verified: '+row.code+' / '+row.exchange+' / scale '+row.calc);
+  return row;
 }
 function nasdaqQuote(c,a){
-  const code=(prop().getProperty('NASDAQ_FUTURES_CODE')||'NQZ26').trim().toUpperCase();
-  if(!/^NQ[HMUZ]\d{2}$/.test(code))throw Error('Set verified KIS Nasdaq100 E-mini contract code');
+  const master=nasdaqMaster(),code=master.code;
   const j=kisMarketGet(c,a,'/uapi/overseas-futureoption/v1/quotations/inquire-price','HHDFC55010000',{SRS_CD:code});
-  const o=onlyRow(j.output1), price=marketNum(o.last_price), pct=marketNum(o.prev_diff_rate);
+  const o=onlyRow(j.output1),scale=Math.pow(10,master.calc),priceRaw=marketNum(o.last_price),prevRaw=marketNum(o.prev_price);
+  const price=priceRaw===null?null:priceRaw*scale,prev=prevRaw===null?null:prevRaw*scale;
   const expiry=String(o.trd_to_date||o.expr_date||'');
-  if(!/^\d{8}$/.test(expiry)||expiry<=localTime(new Date(),'yyyyMMdd'))throw Error('NQ expiry missing or expired; update NASDAQ_FUTURES_CODE');
+  if(!/^\d{8}$/.test(expiry)||expiry<localTime(new Date(),'yyyyMMdd'))throw Error('NQ expiry missing or expired');
   if(!(price>0))throw Error('Invalid NQ quote');
-  const flag=String(o.prev_diff_flag||'');
-  // Only use direction if previous close independently confirms the sign.
-  const prev=marketNum(o.prev_price);
-  const signed=pct===null||!(prev>0)?null:price===prev?0:Math.sign(price-prev)*Math.abs(pct);
-  return {code,price,pct:signed,diff:prev>0?price-prev:null,stamp:String(o.proc_date||'')+' '+String(o.proc_time||''),expiry};
+  const date=String(o.proc_date||''),time=String(o.proc_time||'');
+  if(!/^\d{8}$/.test(date)||!/^\d{6}$/.test(time))throw Error('NQ timestamp missing');
+  const today=localTime(new Date(),'yyyyMMdd'),yesterday=localTime(new Date(Date.now()-86400000),'yyyyMMdd');
+  if(date!==today&&date!==yesterday)throw Error('NQ stale date');
+  const pct=prev>0?(price/prev-1)*100:null;
+  return {code,price,pct,diff:prev>0?price-prev:null,stamp:date+' '+time,expiry};
 }
 function signedNum(v,d=0){return v===null||!Number.isFinite(v)?'미확인':(v>0?'+':'')+v.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});}
 function currentReport(c,a,quotes,flows,nq){
   const p=prop(), now=new Date();
-  // Until the provider's amount scale has been checked against HTS,
-  // preserve the exact raw amounts without attaching a currency unit.
-  const divisor=marketNum(p.getProperty('FLOW_AMOUNT_DIVISOR'));
-  const amountVerified=divisor!==null&&divisor>0;
+  const {divisor,verified:amountVerified}=flowAmountConfig();
   const out=['📊 HanaV 장중 선물·수급 브리핑','조회 '+localTime(now,'MM/dd HH:mm:ss')+' KST','','■ 선물 현재가 / 전일대비'];
   for(const row of quotes){
     const s=row.s;
@@ -221,14 +265,16 @@ function currentReport(c,a,quotes,flows,nq){
     const f=flows.find(x=>x.id===m[2]);
     if(!f){out.push(m[0]+' : 조회 실패/미확인');continue;}
     if(m[2]==='0001'){
-      out.push(m[0]+' 금액'+(amountVerified?'(억원)':'(API 원값, 단위 미검증)'));
-      out.push('  '+f.amount.map(v=>signedNum(amountVerified?v/divisor:v,amountVerified?1:0)).join(' / '));
+      out.push(m[0]+' 순매수대금'+(amountVerified?'(억원)':'(억원* · 잠정 환산)'));
+      out.push('  '+f.amount.map(v=>signedNum(v===null?null:v/divisor,0)).join(' / '));
     }else{
       out.push(m[0]+' (계약 수량 필드)');
       out.push('  '+f.q.map(v=>signedNum(v)).join(' / '));
     }
   }
-  out.push('','+ 순매수 / − 순매도 · 장중 집계는 변동 가능','출처: 한국투자증권 Open API · 투자자별 포지션·매매방향 추정 아님');
+  out.push('','+ 순매수 / − 순매도 · 장중 집계는 변동 가능');
+  if(!amountVerified)out.push('* 현물 API 원값 ÷100 잠정 환산 · HTS 대조 필요');
+  out.push('출처: 한국투자증권 Open API · 투자자별 포지션·매매방향 추정 아님');
   return out.join('\n');
 }
 function readFlows(c,a){
@@ -236,7 +282,26 @@ function readFlows(c,a){
   for(const m of FLOW_MARKETS){try{flows.push(marketFlow(c,a,m));}catch(e){console.warn(m[0]+' flow unavailable');}Utilities.sleep(200);}
   return flows;
 }
-function readNasdaq(c,a){try{return nasdaqQuote(c,a);}catch(e){const msg=String(e.message||'');const safe=/^(KIS market data (rejected: [a-zA-Z0-9_-]+|HTTP \d+|network failure|invalid JSON)|Ambiguous or missing API rows|Missing API row|NQ expiry missing or expired; update NASDAQ_FUTURES_CODE|Invalid NQ quote|Set verified KIS Nasdaq100 E-mini contract code)$/.test(msg)?msg:'unknown response issue';console.warn('Nasdaq quote unavailable: '+safe);return null;}}
+function readNasdaq(c,a){
+  try{return nasdaqQuote(c,a);}catch(e){
+    const msg=String(e.message||'');
+    const safe=/^(KIS market data (rejected: [a-zA-Z0-9_-]+|HTTP \d+ code [a-zA-Z0-9_-]+|network failure|invalid JSON)|NQ master: (invalid override|network failure|HTTP \d+|file missing|no unique front contract)|Ambiguous or missing API rows|Missing API row|NQ expiry missing or expired|Invalid NQ quote|NQ timestamp missing|NQ stale date)$/.test(msg)?msg:'unknown response issue';
+    console.warn('Nasdaq quote unavailable: '+safe);return null;
+  }
+}
+// Run manually during the market to compare against the same-time HTS 0403 screen.
+// No credentials, account information or URLs are printed.
+function testFlowUnits(){
+  if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
+  const c=cfg(),a=access(c),flows=readFlows(c,a),ac=flowAmountConfig();
+  console.log('HTS comparison '+localTime(new Date(),'yyyy-MM-dd HH:mm:ss')+' KST; cash divisor '+ac.divisor+'; '+(ac.verified?'configured':'provisional'));
+  for(const f of flows){
+    console.log(f.name+' | 외국인 / 기관 / 개인 | raw '+f.audit.map(x=>String(x.raw)).join(' / '));
+    console.log(f.name+' | buy '+f.audit.map(x=>String(x.buy)).join(' / ')+' | sell '+f.audit.map(x=>String(x.sell)).join(' / '));
+    console.log(f.name+' | display '+(f.id==='0001'?f.amount.map(v=>signedNum(v===null?null:v/ac.divisor,0)):f.q.map(v=>signedNum(v,0))).join(' / '));
+  }
+  const nq=readNasdaq(c,a);console.log('Nasdaq data '+(nq?'available '+nq.code:'unavailable; CME API subscription may be required'));
+}
 function flowEvents(c,flows){
   const p=prop(),date=localTime(new Date(),'yyyyMMdd'), prior=JSON.parse(p.getProperty('_FLOW_PREV')||'{}');
   // Default only significant foreign KOSPI200 futures net-buy changes.
@@ -244,7 +309,7 @@ function flowEvents(c,flows){
   const limit=marketNum(p.getProperty('FLOW_FUTURES_CHANGE_THRESHOLD'))||1000;
   for(const f of flows){
     const prev=prior[f.id], elapsed=prev?(f.at-prev.at)/60000:0;
-    if(f.id==='F001'&&prev&&prev.date===date&&elapsed>=3&&elapsed<=12){
+    if(f.id==='F001'&&prev&&prev.date===date&&elapsed>=3&&elapsed<=12&&Number.isFinite(f.q[0])&&Number.isFinite(prev.q[0])){
       const diff=f.q[0]-prev.q[0], reversal=prev.q[0]*f.q[0]<0&&Math.abs(diff)>=limit/2;
       if((Math.abs(diff)>=limit||reversal)&&f.at-(prev.lastAlert||0)>=600000){
         telegram(c,'⚡ HanaV 외국인 KOSPI200 선물 수급 변화\n'+(reversal?'순매수/순매도 전환\n':'')+elapsed.toFixed(1)+'분 조회값 변화 '+signedNum(diff)+'계약\n당일 순매수 '+signedNum(f.q[0])+'계약\nKIS 조회 '+localTime(new Date(f.at),'HH:mm:ss')+' (집계 기준시각 미제공)');
@@ -302,7 +367,7 @@ function briefHistory(row){
 }
 function briefSummary(quotes,flows,nq){
   const f=flows.find(x=>x.id==='F001'), cash=flows.find(x=>x.id==='0001');
-  const direction=v=>v>0?'순매수':v<0?'순매도':'보합';
+  const direction=v=>!Number.isFinite(v)?'미확인':v>0?'순매수':v<0?'순매도':'보합';
   const lines=[];
   if(f&&cash)lines.push('외국인: 현물 '+direction(cash.amount[0])+' · 지수선물 '+direction(f.q[0]));
   else if(f)lines.push('외국인 지수선물 '+direction(f.q[0])+' '+briefSigned(f.q[0])+'계약');
@@ -386,27 +451,27 @@ function renderBriefImage(quotes,flows,nq,isTest){
     txt(briefPrice(price,m.dec),x+12,y+28,164,34,price===null?19:25,INK,true);
     txt((Number.isFinite(change)?briefSigned(change,m.dec)+'  ':'')+(Number.isFinite(pct)?'('+briefSigned(pct,2)+'%)':'등락률 미확인'),x+12,y+62,w-24,19,13,briefColor(pct),true);
     if(m.overseas){
-      txt(s?'처리 '+String(s.stamp).replace(/[^0-9 :\-]/g,'').slice(0,22)+' · 지연 미확인':'KIS 해외선물 조회 실패',x+12,y+82,w-24,15,9,MUTED);
+      txt(s?'처리 '+String(s.stamp).replace(/[^0-9 :\-]/g,'').slice(0,22)+' · 지연 미확인':'CME API 시세 권한 확인 필요',x+12,y+82,w-24,15,9,MUTED);
     }else{
       if(s)spark(briefHistory(m.row),x+181,y+30,79,26);
       txt(s?m.row.code+'  |  '+localTime(new Date(s.t),'HH:mm:ss'):'시세 조회 실패',x+12,y+82,w-24,15,9,MUTED);
     }
   });
   txt('02   투자주체별 당일 순매수',23,364,550,28,19,NAVY,true);
-  const divisor=marketNum(p.getProperty('FLOW_AMOUNT_DIVISOR')), amountVerified=Number.isFinite(divisor)&&divisor>0;
+  const {divisor,verified:amountVerified}=flowAmountConfig();
   const xs=[23,202,327,452],ws=[179,125,125,125],top=400,rh=39;
   ['구분','외국인','기관','개인'].forEach((label,i)=>{box(xs[i],top,ws[i],34,NAVY);txt(label,xs[i]+4,top+4,ws[i]-8,26,15,'#FFFFFF',true,'CENTER');});
   FLOW_MARKETS.forEach((m,i)=>{
     const y=top+34+i*rh,f=flows.find(v=>v.id===m[2]),cash=m[2]==='0001';
     const name=cash?'코스피 현물':m[2]==='F001'?'코스피200 선물':m[0];
-    const unit=cash?(amountVerified?'억원':'API 원값*'):'계약';
+    const unit=cash?(amountVerified?'억원':'억원*'):'계약';
     box(xs[0],y,ws[0],rh,i%2?'#F2F6FA':'#F8FAFC',BORDER);
     txt(name,xs[0]+9,y+3,ws[0]-18,20,13.5,INK,true);
     txt(unit,xs[0]+9,y+22,ws[0]-18,13,9,MUTED);
     for(let j=0;j<3;j++){
-      const val=f?(cash?(amountVerified?f.amount[j]/divisor:f.amount[j]):f.q[j]):null;
+      const val=f?(cash?(f.amount[j]===null?null:f.amount[j]/divisor):f.q[j]):null;
       box(xs[j+1],y,ws[j+1],rh,i%2?'#F2F6FA':'#FFFFFF',BORDER);
-      const value=briefSigned(val,cash&&amountVerified?1:0);
+      const value=briefSigned(val,0);
       txt(value,xs[j+1]+3,y+4,ws[j+1]-6,rh-8,value.length>12?10.5:value.length>9?13:17,briefColor(val),true,'END');
     }
   });
@@ -414,7 +479,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
   box(23,668,554,69,'#E8F5F3');
   briefSummary(quotes,flows,nq).forEach((s,i)=>{box(34,679+i*19,5,5,TEAL);txt(s,48,671+i*19,515,19,12,INK,true);});
   txt('출처: KIS Open API  |  수급 집계 기준시각 미제공 · 조회값 기준',23,744,554,16,10,MUTED);
-  txt(amountVerified?'장중 수치는 변동 가능 · 투자자별 포지션 추정 아님':'* 현물 금액 단위 미검증 · API 원값 표시 · 시세 지연 가능',23,761,554,15,9,MUTED);
+  txt(amountVerified?'장중 수치는 변동 가능 · 투자자별 포지션 추정 아님':'* 현물 원값 ÷100 잠정 환산 · HTS 대조 필요 · 지연 가능',23,761,554,15,9,MUTED);
   // Send the exact field masks as JSON, without advanced-service serialization.
   const result=UrlFetchApp.fetch('https://slides.googleapis.com/v1/presentations/'+encodeURIComponent(id)+':batchUpdate',{
     method:'post',contentType:'application/json',headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken()},
@@ -423,7 +488,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
     let detail='';try{detail=String(JSON.parse(result.getContentText()).error.message||'').slice(0,350);}catch(e){}
     throw Error('Slides batch HTTP '+result.getResponseCode()+': '+detail);
   }
-  console.log('R4: Slides drawing complete');
+  console.log('R5: Slides drawing complete');
   const thumbnail=Slides.Presentations.Pages.getThumbnail(id,page,{'thumbnailProperties.mimeType':'PNG','thumbnailProperties.thumbnailSize':'LARGE'});
   if(!thumbnail.contentUrl)throw Error('Brief thumbnail missing');
   const image=UrlFetchApp.fetch(thumbnail.contentUrl,{muteHttpExceptions:true});
@@ -456,7 +521,7 @@ function disableMarketBrief(){
 }
 
 function testMarketBrief(){
-  console.log('HanaV image build: 2026-11-25-R4');
+  console.log('HanaV image build: 2026-11-25-R5');
   if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))throw Error('Radar is already running; retry');
   try{
