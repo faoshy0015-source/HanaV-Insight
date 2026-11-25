@@ -407,7 +407,10 @@ def _rank_setting(name):
 
 @st.cache_data(ttl=72000, show_spinner=False, max_entries=4)
 def _rank_access_token(key, secret):
-    return get_kis_access_token(key, secret)
+    access = get_kis_access_token(key, secret)
+    if not access:
+        raise ValueError("KIS token unavailable")
+    return access
 
 
 def _parse_rising_rank(output):
@@ -445,8 +448,9 @@ def _parse_rising_rank(output):
 def _market_rising_rank(scope, key, secret):
     # Keep error results cached too, to avoid repeated requests during reruns.
     try:
-        access = _rank_access_token(key, secret)
-        if not access:
+        try:
+            access = _rank_access_token(key, secret)
+        except ValueError:
             return [], _now_kst(), "KIS 인증 실패 · API 설정 확인"
         response = requests.get(
             "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/ranking/fluctuation",
