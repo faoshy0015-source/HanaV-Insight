@@ -346,7 +346,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
   function txt(s,x,y,w,h,size=14,color=INK,bold=false,align='START'){
     const oid=newId();
     requests.push({createShape:{objectId:oid,shapeType:'TEXT_BOX',elementProperties:{pageObjectId:page,size:{width:dim((w+8)*sx),height:dim((h+8)*sy)},transform:{scaleX:1,scaleY:1,translateX:offX+(x-4)*sx,translateY:offY+(y-4)*sy,unit:'PT'}}}});
-    requests.push({updateShapeProperties:{objectId:oid,shapeProperties:{contentAlignment:'MIDDLE'},fields:'contentAlignment'}});
+    // Text boxes use native defaults; no shape-property update on text.
     requests.push({insertText:{objectId:oid,text:String(s)}});
     requests.push({updateTextStyle:{objectId:oid,textRange:{type:'ALL'},style:{fontFamily:'Noto Sans KR',fontSize:dim(size*sf),bold,foregroundColor:{opaqueColor:rgb(color)}},fields:'fontFamily,fontSize,bold,foregroundColor'}});
     requests.push({updateParagraphStyle:{objectId:oid,textRange:{type:'ALL'},style:{alignment:align,spaceAbove:dim(0),spaceBelow:dim(0),lineSpacing:100},fields:'alignment,spaceAbove,spaceBelow,lineSpacing'}});
@@ -415,7 +415,15 @@ function renderBriefImage(quotes,flows,nq,isTest){
   briefSummary(quotes,flows,nq).forEach((s,i)=>{box(34,679+i*19,5,5,TEAL);txt(s,48,671+i*19,515,19,12,INK,true);});
   txt('출처: KIS Open API  |  수급 집계 기준시각 미제공 · 조회값 기준',23,744,554,16,10,MUTED);
   txt(amountVerified?'장중 수치는 변동 가능 · 투자자별 포지션 추정 아님':'* 현물 금액 단위 미검증 · API 원값 표시 · 시세 지연 가능',23,761,554,15,9,MUTED);
-  Slides.Presentations.batchUpdate({requests},id);
+  // Send the exact field masks as JSON, without advanced-service serialization.
+  const result=UrlFetchApp.fetch('https://slides.googleapis.com/v1/presentations/'+encodeURIComponent(id)+':batchUpdate',{
+    method:'post',contentType:'application/json',headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken()},
+    payload:JSON.stringify({requests,writeControl:{requiredRevisionId:doc.revisionId}}),muteHttpExceptions:true});
+  if(result.getResponseCode()!==200){
+    let detail='';try{detail=String(JSON.parse(result.getContentText()).error.message||'').slice(0,350);}catch(e){}
+    throw Error('Slides batch HTTP '+result.getResponseCode()+': '+detail);
+  }
+  console.log('R4: Slides drawing complete');
   const thumbnail=Slides.Presentations.Pages.getThumbnail(id,page,{'thumbnailProperties.mimeType':'PNG','thumbnailProperties.thumbnailSize':'LARGE'});
   if(!thumbnail.contentUrl)throw Error('Brief thumbnail missing');
   const image=UrlFetchApp.fetch(thumbnail.contentUrl,{muteHttpExceptions:true});
@@ -448,6 +456,7 @@ function disableMarketBrief(){
 }
 
 function testMarketBrief(){
+  console.log('HanaV image build: 2026-11-25-R4');
   if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))throw Error('Radar is already running; retry');
   try{
