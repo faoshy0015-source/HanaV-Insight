@@ -444,9 +444,9 @@ function renderBriefImage(quotes,flows,nq,isTest){
   const rgb=h=>({rgbColor:rgbBrief(h)});
   const NAVY='#102D4F',INK='#172638',TEAL='#087C78',MUTED='#64748B',BORDER='#DCE4ED';
   requests.push({updatePageProperties:{objectId:page,pageProperties:{pageBackgroundFill:{solidFill:{color:rgb('#FFFFFF'),alpha:1}}},fields:'pageBackgroundFill'}});
-  function box(x,y,w,h,fill,outline=null,angle=0){
+  function box(x,y,w,h,fill,outline=null,angle=0,shapeType='RECTANGLE'){
     const oid=newId(),co=Math.cos(angle),si=Math.sin(angle);
-    requests.push({createShape:{objectId:oid,shapeType:'RECTANGLE',elementProperties:{pageObjectId:page,size:{width:dim(w*sx),height:dim(h*sy)},transform:{scaleX:co,scaleY:co,shearX:-si* sx/sy,shearY:si*sy/sx,translateX:offX+x*sx,translateY:offY+y*sy,unit:'PT'}}}});
+    requests.push({createShape:{objectId:oid,shapeType,elementProperties:{pageObjectId:page,size:{width:dim(w*sx),height:dim(h*sy)},transform:{scaleX:co,scaleY:co,shearX:-si* sx/sy,shearY:si*sy/sx,translateX:offX+x*sx,translateY:offY+y*sy,unit:'PT'}}}});
     const shapeProperties={shapeBackgroundFill:{solidFill:{color:rgb(fill),alpha:1}},outline:outline?{outlineFill:{solidFill:{color:rgb(outline),alpha:1}},weight:dim(0.8*sf),dashStyle:'SOLID'}:{propertyState:'NOT_RENDERED'}};
     requests.push({updateShapeProperties:{objectId:oid,shapeProperties,fields:'shapeBackgroundFill,outline'}});
     return oid;
@@ -463,15 +463,34 @@ function renderBriefImage(quotes,flows,nq,isTest){
     const dx=x2-x1,dy=y2-y1,len=Math.hypot(dx,dy);
     if(len>0.01)box(x1,y1,len,1.7,color,null,Math.atan2(dy,dx));
   }
-  function spark(points,x,y,w,h){
+  function spark(points,x,y,w,h,dayPct){
     if(points.length<3){txt('추세 데이터 대기',x,y,w,h,9,MUTED,false,'CENTER');return;}
     const lo=Math.min(...points.map(v=>v.p)),hi=Math.max(...points.map(v=>v.p));
-    const last=points[points.length-1],first=points[0], span=last.t-first.t;
+    const last=points[points.length-1],first=points[0],span=last.t-first.t;
     if(span<=0){txt('추세 데이터 대기',x,y,w,h,9,MUTED,false,'CENTER');return;}
-    const color=briefColor(last.p-first.p);
-    const coords=points.map(v=>[x+w*(v.t-first.t)/span,y+h*(hi===lo?0.5:1-(v.p-lo)/(hi-lo))]);
+    const color=briefColor(Number.isFinite(dayPct)?dayPct:last.p-first.p);
+    const fill=color==='#CF2639'?'#FCE7EC':color==='#2056C7'?'#E2EDFF':'#EDF1F5';
+    const coords=points.map(v=>[x+w*(v.t-first.t)/span,y+2+(h-4)*(hi===lo?0.5:1-(v.p-lo)/(hi-lo))]);
+    // Area fill is built from interpolated strips between real consecutive samples.
+    // Gaps longer than eight minutes remain blank; never fabricate new samples.
+    for(let i=1;i<coords.length;i++){
+      if(points[i].t-points[i-1].t>8*60000)continue;
+      const [x1,y1]=coords[i-1],[x2,y2]=coords[i];
+      const n=Math.max(1,Math.ceil((x2-x1)/4));
+      for(let k=0;k<n;k++){
+        const xx=x1+(x2-x1)*k/n,yy=y1+(y2-y1)*(k+0.5)/n;
+        box(xx,yy,(x2-x1)/n+0.08,Math.max(0.4,y+h-yy),fill);
+      }
+    }
     for(let i=1;i<coords.length;i++)if(points[i].t-points[i-1].t<=8*60000)line(...coords[i-1],...coords[i],color);
-    txt('최근 '+Math.round(span/60000)+'분 · '+points.length+'회',x,y+h+3,w,14,8.5,MUTED,false,'CENTER');
+    txt('최근 '+Math.round(span/60000)+'분',x,y+h+1,w,12,8.5,MUTED,false,'CENTER');
+  }
+  // Original compact identification graphics; not company trademarks.
+  function tickerMark(i,x,y){
+    const marks=[['KR','#EDF3FE','#2457B6'],['S','#17469E','#FFFFFF'],['SK','#FFF0E9','#C84224'],['US','#EDF3FE','#2457B6']];
+    const [label,bg,fg]=marks[i];
+    box(x,y,19,14,bg,null,0,'ROUND_RECTANGLE');
+    txt(label,x+1,y-1,17,15,9,fg,true,'CENTER');
   }
   // White portal dashboard: quote cards -> investor flows -> market summary -> checks.
   const BLUE='#2875E9',LIGHT='#F1F6FD',EDGE='#E0E7EF',PAPER='#FFFFFF';
@@ -481,8 +500,10 @@ function renderBriefImage(quotes,flows,nq,isTest){
   txt('HanaV Insight',48,10,500,28,19,NAVY,true);
   box(20,46,5,32,BLUE);
   txt('장중 선물·수급 브리핑',32,42,548,34,25,NAVY,true);
-  box(20,87,5,5,'#159447');
-  txt((isTest?'연동 테스트  |  ':'장중 브리핑  |  ')+localTime(now,'MM.dd HH:mm:ss')+' KST 조회',32,79,548,22,12,MUTED);
+  box(19,80,94,21,'#E1F4E7',null,0,'ROUND_RECTANGLE');
+  box(25,88,5,5,'#159447',null,0,'ELLIPSE');
+  txt(isTest?'연동 테스트':'장중 브리핑',34,80,77,20,11,'#16783B',true);
+  txt(localTime(now,'MM.dd HH:mm:ss')+' KST 조회',123,79,451,22,12,MUTED);
   const wanted=[
     {label:'KOSPI200 선물',row:quotes.find(r=>/KOSPI\s*200/i.test(r.label)),dec:2},
     {label:'삼성전자 선물',row:quotes.find(r=>/삼성전자/.test(r.label)),dec:0},
@@ -491,8 +512,9 @@ function renderBriefImage(quotes,flows,nq,isTest){
   ];
   wanted.forEach((m,i)=>{
     const x=16+i*143,y=122,w=139,h=116;
-    box(x,y,w,h,PAPER,i===0?'#A6C5EF':EDGE);
-    txt(m.label,x+7,y+7,w-14,20,i===2?12:13,NAVY,true);
+    box(x,y,w,h,PAPER,i===0?'#486FAD':EDGE,0,'ROUND_RECTANGLE');
+    tickerMark(i,x+7,y+9);
+    txt(m.label,x+29,y+7,w-34,20,i===2?11:12,NAVY,true);
     const s=m.overseas?nq:m.row&&m.row.s;
     const price=s?(m.overseas?s.price:s.p):null,pct=s?(m.overseas?s.pct:s.dayPct):null;
     const change=s?(m.overseas?s.diff:s.dayDiff):null;
@@ -504,7 +526,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
       txt(s?'처리 '+String(s.stamp).slice(9,15):'시세 미수신',x+7,y+77,w-14,17,10,MUTED);
       txt(s?'지연 여부 미확인':'CME 권한 확인 필요',x+7,y+95,w-14,16,9,MUTED);
     }else if(s){
-      spark(briefHistory(m.row),x+9,y+77,w-18,19);
+      spark(briefHistory(m.row),x+9,y+75,w-18,23,pct);
     }else txt('시세 조회 실패',x+7,y+80,w-14,20,10,MUTED);
   });
   // Same investor flow fields, column order, and monetary divisor as R6.
@@ -580,7 +602,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
     let detail='';try{detail=String(JSON.parse(result.getContentText()).error.message||'').slice(0,350);}catch(e){}
     throw Error('Slides batch HTTP '+result.getResponseCode()+': '+detail);
   }
-  console.log('R7: Slides drawing complete');
+  console.log('R8: Slides drawing complete');
   const thumbnail=Slides.Presentations.Pages.getThumbnail(id,page,{'thumbnailProperties.mimeType':'PNG','thumbnailProperties.thumbnailSize':'LARGE'});
   if(!thumbnail.contentUrl)throw Error('Brief thumbnail missing');
   const image=UrlFetchApp.fetch(thumbnail.contentUrl,{muteHttpExceptions:true});
@@ -613,7 +635,7 @@ function disableMarketBrief(){
 }
 
 function testMarketBrief(){
-  console.log('HanaV image build: 2026-11-25-R7');
+  console.log('HanaV image build: 2026-11-25-R8');
   if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))throw Error('Radar is already running; retry');
   try{
