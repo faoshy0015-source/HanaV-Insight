@@ -48,10 +48,13 @@ function quote(c,a,contract){
   const n=x=>x===null||x===undefined||String(x).trim()===''?null:Number.isFinite(Number(String(x).replace(/,/g,'')))?Number(String(x).replace(/,/g,'')):null;
   const price=n(o.futs_prpr);
   if(!(price>0))throw Error('Invalid quote');
-  return {t:stamp,p:price,v:n(o.acml_vol),b:market==='F'?n(o.basis):null,oi:n(o.hts_otst_stpl_qty),label:String(o.hts_kor_isnm||label)};
+  const rawPct=n(o.futs_prdy_ctrt), sign=String(o.prdy_vrss_sign||'');
+  const dayPct=rawPct===null?null:['4','5'].includes(sign)?-Math.abs(rawPct):['1','2'].includes(sign)?Math.abs(rawPct):sign==='3'&&rawPct===0?0:null;
+  return {t:stamp,p:price,dayPct,v:n(o.acml_vol),b:market==='F'?n(o.basis):null,oi:n(o.hts_otst_stpl_qty),label:String(o.hts_kor_isnm||label)};
 }
-function checkContract(c,a,contract){
-  const p=prop(), key='_H_'+contract[0]+'_'+contract[1].toUpperCase(), s=quote(c,a,contract);
+function checkContract(c,a,contract,s){
+  const p=prop(), key='_H_'+contract[0]+'_'+contract[1].toUpperCase();
+  s=s||quote(c,a,contract);
   let state=JSON.parse(p.getProperty(key)||'{"history":[],"sent":{}}');
   const date=localTime(new Date(s.t),'yyyyMMdd');
   if(state.date!==date)state={date,history:[],sent:{}};
@@ -151,14 +154,138 @@ function testMaster(){
   console.log('KIS front-month master verified: '+contracts.map(x=>x.join(',')).join('; '));
 }
 
+
+// Market-level flow: KIS domestic stock-074 (not individual stock investor flows).
+const FLOW_MARKETS=[
+  ['KOSPI 현물','KSP','0001'],
+  ['KOSPI200 선물','K2I','F001'],
+  ['콜옵션','K2I','OC01'],
+  ['풋옵션','K2I','OP01'],
+  ['주식선물 전체','999','S001']
+];
+const FLOW_PEOPLE=[['외국인','frgn'],['기관','orgn'],['개인','prsn']];
+function marketNum(x){if(x===null||x===undefined||String(x).trim()==='')return null;const n=Number(String(x).replace(/,/g,''));return Number.isFinite(n)?n:null;}
+function kisMarketGet(c,a,path,tr,params){
+  const query=Object.keys(params).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
+  const j=req(BASE+path+'?'+query,{headers:{authorization:'Bearer '+a,appkey:c.KIS_APP_KEY,appsecret:c.KIS_APP_SECRET,tr_id:tr,custtype:'P'}},'KIS market data');
+  if(String(j.rt_cd)!=='0')throw Error('KIS market data rejected: '+String(j.msg_cd||'unknown').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,24));
+  return j;
+}
+function onlyRow(value){
+  if(Array.isArray(value)){if(value.length!==1)throw Error('Ambiguous or missing API rows');value=value[0];}
+  if(!value||typeof value!=='object')throw Error('Missing API row');
+  return value;
+}
+function marketFlow(c,a,m){
+  const j=kisMarketGet(c,a,'/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market','FHPTJ04030000',{FID_INPUT_ISCD:m[1],FID_INPUT_ISCD_2:m[2]});
+  const o=onlyRow(j.output);
+  const q=FLOW_PEOPLE.map(x=>marketNum(o[x[1]+'_ntby_qty']));
+  const amount=FLOW_PEOPLE.map(x=>marketNum(o[x[1]+'_ntby_tr_pbmn']));
+  if(q.some(x=>x===null)||amount.some(x=>x===null))throw Error('Incomplete net-buy fields');
+  return {name:m[0],id:m[2],q,amount,at:Date.now()};
+}
+function nasdaqQuote(c,a){
+  const code=(prop().getProperty('NASDAQ_FUTURES_CODE')||'NQZ26').trim().toUpperCase();
+  if(!/^NQ[HMUZ]\d{2}$/.test(code))throw Error('Set verified KIS Nasdaq100 E-mini contract code');
+  const j=kisMarketGet(c,a,'/uapi/overseas-futureoption/v1/quotations/inquire-price','HHDFC55010000',{SRS_CD:code});
+  const o=onlyRow(j.output1), price=marketNum(o.last_price), pct=marketNum(o.prev_diff_rate);
+  const expiry=String(o.trd_to_date||o.expr_date||'');
+  if(!/^\d{8}$/.test(expiry)||expiry<=localTime(new Date(),'yyyyMMdd'))throw Error('NQ expiry missing or expired; update NASDAQ_FUTURES_CODE');
+  if(!(price>0))throw Error('Invalid NQ quote');
+  const flag=String(o.prev_diff_flag||'');
+  // Only use direction if previous close independently confirms the sign.
+  const prev=marketNum(o.prev_price);
+  const signed=pct===null||!(prev>0)?null:price===prev?0:Math.sign(price-prev)*Math.abs(pct);
+  return {code,price,pct:signed,stamp:String(o.proc_date||'')+' '+String(o.proc_time||''),expiry};
+}
+function signedNum(v,d=0){return v===null||!Number.isFinite(v)?'미확인':(v>0?'+':'')+v.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});}
+function currentReport(c,a,quotes,flows,nq){
+  const p=prop(), now=new Date();
+  // Until the provider's amount scale has been checked against HTS,
+  // preserve the exact raw amounts without attaching a currency unit.
+  const divisor=marketNum(p.getProperty('FLOW_AMOUNT_DIVISOR'));
+  const amountVerified=divisor!==null&&divisor>0;
+  const out=['📊 HanaV 장중 선물·수급 브리핑','조회 '+localTime(now,'MM/dd HH:mm:ss')+' KST','','■ 선물 현재가 / 전일대비'];
+  for(const row of quotes){
+    const s=row.s;
+    out.push(row.label+' ('+row.code+') '+(s?s.p.toLocaleString('en-US')+' / '+signedNum(s.dayPct,2)+(s.dayPct===null?'':'%')+' · '+localTime(new Date(s.t),'HH:mm:ss'):'조회 실패/시세 지연'));
+  }
+  out.push('나스닥100 E-mini '+(nq?nq.code+' '+nq.price.toLocaleString('en-US')+' / '+signedNum(nq.pct,2)+(nq.pct===null?'':'%')+'\n  제공처 처리시각 '+nq.stamp+' (시간대·지연 미검증)':'조회 실패/권한 또는 월물 확인'));
+  out.push('','■ 시장별 순매수 · 외국인 / 기관 / 개인','KIS 조회값 · 당일 집계 기준시각은 API 미제공');
+  for(const m of FLOW_MARKETS){
+    const f=flows.find(x=>x.id===m[2]);
+    if(!f){out.push(m[0]+' : 조회 실패/미확인');continue;}
+    if(m[2]==='0001'){
+      out.push(m[0]+' 금액'+(amountVerified?'(억원)':'(API 원값, 단위 미검증)'));
+      out.push('  '+f.amount.map(v=>signedNum(amountVerified?v/divisor:v,amountVerified?1:0)).join(' / '));
+    }else{
+      out.push(m[0]+' (계약 수량 필드)');
+      out.push('  '+f.q.map(v=>signedNum(v)).join(' / '));
+    }
+  }
+  out.push('','+ 순매수 / − 순매도 · 장중 집계는 변동 가능','출처: 한국투자증권 Open API · 투자자별 포지션·매매방향 추정 아님');
+  return out.join('\n');
+}
+function readFlows(c,a){
+  const flows=[];
+  for(const m of FLOW_MARKETS){try{flows.push(marketFlow(c,a,m));}catch(e){console.warn(m[0]+' flow unavailable');}Utilities.sleep(200);}
+  return flows;
+}
+function readNasdaq(c,a){try{return nasdaqQuote(c,a);}catch(e){console.warn('Nasdaq quote unavailable');return null;}}
+function flowEvents(c,flows){
+  const p=prop(),date=localTime(new Date(),'yyyyMMdd'), prior=JSON.parse(p.getProperty('_FLOW_PREV')||'{}');
+  // Default only significant foreign KOSPI200 futures net-buy changes.
+  // No price/position inferred from option activity.
+  const limit=marketNum(p.getProperty('FLOW_FUTURES_CHANGE_THRESHOLD'))||1000;
+  for(const f of flows){
+    const prev=prior[f.id], elapsed=prev?(f.at-prev.at)/60000:0;
+    if(f.id==='F001'&&prev&&prev.date===date&&elapsed>=3&&elapsed<=12){
+      const diff=f.q[0]-prev.q[0], reversal=prev.q[0]*f.q[0]<0&&Math.abs(diff)>=limit/2;
+      if((Math.abs(diff)>=limit||reversal)&&f.at-(prev.lastAlert||0)>=600000){
+        telegram(c,'⚡ HanaV 외국인 KOSPI200 선물 수급 변화\n'+(reversal?'순매수/순매도 전환\n':'')+elapsed.toFixed(1)+'분 조회값 변화 '+signedNum(diff)+'계약\n당일 순매수 '+signedNum(f.q[0])+'계약\nKIS 조회 '+localTime(new Date(f.at),'HH:mm:ss')+' (집계 기준시각 미제공)');
+        prev.lastAlert=f.at;
+      }
+    }
+    prior[f.id]={date,at:f.at,q:f.q,lastAlert:prev&&prev.date===date?prev.lastAlert||0:0};
+  }
+  p.setProperty('_FLOW_PREV',JSON.stringify(prior));
+}
+function reportDue(now){
+  const hm=Number(localTime(now,'HHmm')), min=Number(localTime(now,'mm'));
+  if(hm<900||hm>1535||min%30>=10)return null;
+  const slot=localTime(now,'yyyyMMddHH')+(min<30?'00':'30');
+  return prop().getProperty('_REPORT_SLOT')===slot?null:slot;
+}
+// Manually send a full snapshot to the configured owner chat only.
+function testMarketBrief(){
+  if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
+  const lock=LockService.getScriptLock();if(!lock.tryLock(1000))throw Error('Radar is already running; retry');
+  try{
+    const c=cfg(),a=access(c),contracts=frontContracts(c);
+    const quotes=contracts.map(x=>{let s=null;try{s=quote(c,a,x);}catch(e){console.warn(x[2]+' quote unavailable');}return {label:x[2],code:x[1],s};});
+    const flows=readFlows(c,a),nq=readNasdaq(c,a);
+    console.log('Verified responses: domestic '+quotes.filter(x=>x.s).length+'/'+quotes.length+', investor flows '+flows.length+'/5, Nasdaq '+(nq?'1/1':'0/1'));
+    telegram(c,'[연동 테스트 · 개인 확인용]\n'+currentReport(c,a,quotes,flows,nq));
+  }finally{lock.releaseLock();}
+}
+
 function radarTick(){
   if(!active(new Date()))return;
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))return;
   try{
-    const c=cfg(), contracts=frontContracts(c),a=access(c);let ok=0,failed=0;
+    const c=cfg(), contracts=frontContracts(c),a=access(c);let ok=0,failed=0;const quotes=[];
     for(const contract of contracts){
-      try{checkContract(c,a,contract);ok++;}catch(e){failed++;console.warn('Contract check failed (no secret values logged)');}
+      let s=null;
+      try{s=quote(c,a,contract);ok++;}catch(e){failed++;console.warn('Contract check failed (no secret values logged)');}
+      quotes.push({label:contract[2],code:contract[1],s});
+      if(s)try{checkContract(c,a,contract,s);}catch(e){console.warn('Contract event delivery failed');}
       Utilities.sleep(200);
+    }
+    if((prop().getProperty('MARKET_BRIEF_ENABLED')||'false').toLowerCase()==='true'){
+      const flows=readFlows(c,a);
+      try{flowEvents(c,flows);}catch(e){console.warn('Flow event delivery failed');}
+      const slot=reportDue(new Date());
+      if(slot){const nq=readNasdaq(c,a);telegram(c,currentReport(c,a,quotes,flows,nq));prop().setProperty('_REPORT_SLOT',slot);}
     }
     if(c.news)try{news(c);}catch(e){console.warn('News check failed');}
     console.log('Radar: '+ok+' fresh quotes; '+failed+' failed');
