@@ -480,7 +480,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
   [0,1,2].forEach(i=>box(20+i*8,22-i*4,5,12+i*4,i===2?'#85B6FF':BLUE));
   txt('HanaV Insight',48,10,500,28,19,NAVY,true);
   box(20,46,5,32,BLUE);
-  txt('원장님용 장중 선물·수급 브리핑',32,42,548,34,25,NAVY,true);
+  txt('장중 선물·수급 브리핑',32,42,548,34,25,NAVY,true);
   box(20,87,5,5,'#159447');
   txt((isTest?'연동 테스트  |  ':'장중 브리핑  |  ')+localTime(now,'MM.dd HH:mm:ss')+' KST 조회',32,79,548,22,12,MUTED);
   const wanted=[
