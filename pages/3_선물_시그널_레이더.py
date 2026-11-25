@@ -1,5 +1,6 @@
 """HanaV Futures Radar Streamlit page (read-only)."""
 import os
+import re
 import time
 import threading
 import hashlib
@@ -57,25 +58,51 @@ with st.expander("⚙ 감시 대상 및 시그널 조건",expanded=not bool(st.s
     st.caption("KIS 공식 종목마스터에서 최근월물만 조회합니다. 직접 입력값이 있으면 우선 사용합니다. 연결선물·옵션·스프레드는 제외합니다.")
     master,master_errors=contract_master()
     for err in master_errors: st.caption(err)
-    options=[(a,b,c,d) for a,b,c,d in master]
+    # The customer's radar excludes Hyundai Motor futures, including a previously
+    # saved December contract. Other non-Hyundai contracts remain selectable.
+    def is_hyundai_motor(label):
+        name=re.sub(r"\s+","",str(label)).upper()
+        return (name.startswith("현대차") or name.startswith("현대자동차")
+                or name.startswith("HYUNDAIMOTOR"))
+    excluded_codes={b.upper() for a,b,c,d in master
+                    if a=="JF" and (is_hyundai_motor(d) or is_hyundai_motor(c))}
+    excluded_codes.add("A16612")
+    def excluded_contract(market,code,label):
+        return market=="JF" and (code.upper() in excluded_codes or is_hyundai_motor(label))
+    def clean_contract_input(value):
+        keep=[]
+        for line in re.split(r"[;\r\n]+",str(value or "")):
+            if not line.strip(): continue
+            parts=[p.strip() for p in line.split(",")]
+            if len(parts)==3 and excluded_contract(*parts): continue
+            keep.append(line)
+        return "\n".join(keep)
+    options=[(a,b,c,d) for a,b,c,d in master if not excluded_contract(a,b,c)]
     defaults=[]
-    import re
-    for target in ("KOSPI200","KOSDAQ150","삼성전자","SK하이닉스","현대차"):
+    for target in ("KOSPI200","삼성전자","SK하이닉스"):
         aliases={"KOSPI200":("KOSPI200","코스피200"),"KOSDAQ150":("KOSDAQ150","코스닥150")}.get(target,(target,))
         for item in options:
             underlying=re.sub(r"\s+","",item[3]).upper()
             if underlying in aliases and (item[0]=="JF" or not any(x in item[2].upper() for x in ("미니","MINI"))):
                 defaults.append(item); break
+    if "radar_master_selection" in st.session_state:
+        previous=st.session_state["radar_master_selection"]
+        cleaned=[item for item in previous if item in options]
+        if cleaned!=previous: st.session_state["radar_master_selection"]=cleaned
     selected=st.multiselect("최근월물 선택",options,default=defaults,format_func=lambda x:x[3]+" · "+x[2]+" ("+x[1]+")",max_selections=12,key="radar_master_selection")
     if not options: st.caption("마스터 조회 불가: 아래에 실제 월물코드를 직접 입력하세요.")
-    raw=st.text_area("감시 월물 (한 줄에 시장구분,단축코드,표시명)",value=setting("FUTURES_CONTRACTS"),placeholder="F,실제월물코드,KOSPI200 선물\nJF,실제월물코드,삼성전자 선물",height=125,key="radar_contracts")
+    if "radar_contracts" in st.session_state:
+        previous=st.session_state["radar_contracts"]
+        cleaned=clean_contract_input(previous)
+        if cleaned!=previous: st.session_state["radar_contracts"]=cleaned
+    raw=st.text_area("감시 월물 (한 줄에 시장구분,단축코드,표시명)",value=clean_contract_input(setting("FUTURES_CONTRACTS")),placeholder="F,실제월물코드,KOSPI200 선물\nJF,실제월물코드,삼성전자 선물",height=125,key="radar_contracts")
     a,b,c=st.columns(3)
     threshold=a.number_input("5분 변동률 (%)",.10,5.0,.35,.05, key="radar_pct")
     vol_threshold=b.number_input("거래량 급증 배수",1.5,10.0,3.0,.5,key="radar_vol")
     basis_threshold=c.number_input("베이시스 5분 변화 (pt)",.1,5.0,.5,.1,key="radar_basis")
     watch_news=st.text_input("추가 뉴스 관심 키워드 (쉼표 구분)",placeholder="삼성전자, SK하이닉스, 로봇",key="radar_news")
 try:
-    contracts=tuple(parse_contracts(raw)) if raw.strip() else tuple((a,b,c) for a,b,c,d in selected)
+    contracts=tuple(x for x in parse_contracts(clean_contract_input(raw)) if not excluded_contract(*x)) if clean_contract_input(raw).strip() else tuple((a,b,c) for a,b,c,d in selected)
 except ValueError as e:
     st.error(str(e)); contracts=()
 if not key or not secret:
@@ -141,7 +168,7 @@ def monitor():
     log=st.session_state.get("radar_log",[])
     seen=st.session_state.get("radar_seen",{})
     # A new trading date resets local observations, not an exchange holiday calendar.
-    log=[x for x in log if x["time"][:10]==t.date().isoformat()]
+    log=[x for x in log if x["time"][:10]==t.date().isoformat() and not is_hyundai_motor(x.get("title","")) and not any(x.get("key","").startswith("JF:"+code+":") for code in excluded_codes)]
     seen={k:v for k,v in seen.items() if t.timestamp()-v<86400}
     events=[]; rows=[]
     for s in values:
