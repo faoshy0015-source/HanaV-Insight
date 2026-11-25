@@ -316,8 +316,9 @@ function renderBriefImage(quotes,flows,nq,isTest){
   if(!id||!page||typeof Slides==='undefined')throw Error('Run setupBriefCanvas and enable Google Slides API');
   const doc=Slides.Presentations.get(id);
   if(doc.title!=='HanaV Brief Canvas (private)'||!doc.slides||doc.slides.length!==1||doc.slides[0].objectId!==page)throw Error('Use only dedicated one-slide HanaV canvas');
-  const W=doc.pageSize.width.magnitude,H=doc.pageSize.height.magnitude;
-  if(doc.pageSize.width.unit!=='PT'||doc.pageSize.height.unit!=='PT'||W/H<0.70||W/H>0.82)throw Error('Canvas page setup must be portrait 8 x 10.5 inches');
+  const toPt=d=>d.unit==='PT'?d.magnitude:d.unit==='EMU'?d.magnitude/12700:NaN;
+  const W=toPt(doc.pageSize.width),H=toPt(doc.pageSize.height);
+  if(!(W>0&&H>0)||W/H<0.70||W/H>0.82)throw Error('Canvas page setup must be portrait 8 x 10.5 inches');
   const sx=W/600,sy=H/788,sf=Math.min(sx,sy);
   const now=new Date(), tag='hb_'+Date.now().toString(36)+'_',requests=[];
   let seq=0;
