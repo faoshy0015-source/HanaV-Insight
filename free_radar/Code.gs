@@ -6,7 +6,7 @@ function prop(){return PropertiesService.getScriptProperties();}
 function cfg(){
   const p=prop(), required=['KIS_APP_KEY','KIS_APP_SECRET','FUTURES_CONTRACTS','RADAR_TELEGRAM_BOT_TOKEN','RADAR_TELEGRAM_CHAT_ID'];
   const c={}; required.forEach(k=>{c[k]=(p.getProperty(k)||'').trim();if(!c[k])throw Error('Missing property: '+k);});
-  c.contracts=c.FUTURES_CONTRACTS.split(/\r?\n/).filter(x=>x.trim()).map(x=>x.split(',').map(y=>y.trim()));
+  c.contracts=c.FUTURES_CONTRACTS.split(/[;\r\n]+/).filter(x=>x.trim()).map(x=>x.split(',').map(y=>y.trim()));
   if(c.contracts.length>12||c.contracts.some(x=>x.length!==3||!['F','JF'].includes(x[0])||!/^[A-Za-z0-9]{5,12}$/.test(x[1])||!x[2]))throw Error('Invalid FUTURES_CONTRACTS');
   c.contracts=[...new Map(c.contracts.map(x=>[x[0]+':'+x[1].toUpperCase(),x])).values()];
   c.news=(p.getProperty('RADAR_ALERT_NEWS')||'true').toLowerCase()==='true';
@@ -96,12 +96,67 @@ function news(c){
     if(++count>=3)break;
   }
 }
+
+// Resolve front month by stable master underlying ID AND product kind.
+// Never guess a contract code or switch to another underlying.
+function frontContracts(c){
+  const p=prop(), date=localTime(new Date(),'yyyyMMdd');
+  const signature=JSON.stringify(c.contracts);
+  const cached=JSON.parse(p.getProperty('_FRONT_CACHE')||'null');
+  if(cached&&cached.date===date&&cached.signature===signature)return cached.contracts;
+  const ids=JSON.parse(p.getProperty('_FRONT_IDENTITIES')||'{}');
+  const previous=JSON.parse(p.getProperty('_FRONT_LAST')||'{}');
+  const masters={};
+  for(const market of [...new Set(c.contracts.map(x=>x[0]))]){
+    const filename=market==='F'?'fo_idx_code_mts':'fo_stk_code_mts';
+    const kinds=market==='F'?['1','3','7','9','B']:['1','3'];
+    const url='https://new.real.download.dws.co.kr/common/master/'+filename+'.mst.zip';
+    let response;
+    try{response=UrlFetchApp.fetch(url,{muteHttpExceptions:true});}catch(e){throw Error('KIS master network failure: '+market);}
+    if(response.getResponseCode()!==200)throw Error('KIS master HTTP '+response.getResponseCode());
+    const files=Utilities.unzip(response.getBlob().setContentType('application/zip'));
+    const file=files.find(f=>/\.mst$/i.test(f.getName()));
+    if(!file)throw Error('KIS master missing');
+    let raw;
+    try{raw=file.getDataAsString('MS949');}catch(e){raw=file.getDataAsString('EUC-KR');}
+    masters[market]=raw.split(/\r?\n/).map(l=>l.split('|').map(v=>v.trim())).filter(f=>f.length===9&&kinds.includes(f[0])&&/^[A-Za-z0-9]{5,12}$/.test(f[1])&&f[7]);
+    if(!masters[market].length)throw Error('KIS master format unverified: '+market);
+  }
+  const resolved=[], next={}, changes=[];
+  for(const [market,seed,label] of c.contracts){
+    const k=market+':'+seed.toUpperCase(), rows=masters[market];
+    let id=ids[k];
+    if(!id){
+      const exact=rows.filter(f=>f[1].toUpperCase()===seed.toUpperCase());
+      if(exact.length!==1)throw Error('Initial contract identity not found: '+market+':'+seed);
+      id={kind:exact[0][0],under:exact[0][7]};
+    }
+    const match=rows.filter(f=>f[0]===id.kind&&f[7]===id.under&&f[6]==='1');
+    const codes=[...new Set(match.map(f=>f[1].toUpperCase()))];
+    if(codes.length!==1)throw Error('No unique front-month contract: '+market+':'+seed);
+    const code=codes[0];
+    ids[k]=id;next[k]=code;resolved.push([market,code,label]);
+    const old=previous[k]||seed.toUpperCase();
+    if(old!==code)changes.push(label+': '+old+' → '+code);
+  }
+  if(new Set(resolved.map(x=>x[0]+':'+x[1])).size!==resolved.length)throw Error('Duplicate resolved contracts');
+  p.setProperty('_FRONT_IDENTITIES',JSON.stringify(ids));
+  if(changes.length)telegram(c,'HanaV Futures Radar | 최근월물 변경 (KIS 종목마스터 기준)\n'+changes.join('\n'));
+  p.setProperty('_FRONT_LAST',JSON.stringify(next));
+  p.setProperty('_FRONT_CACHE',JSON.stringify({date,signature,contracts:resolved}));
+  return resolved;
+}
+function testMaster(){
+  const c=cfg(), contracts=frontContracts(c);
+  console.log('KIS front-month master verified: '+contracts.map(x=>x.join(',')).join('; '));
+}
+
 function radarTick(){
   if(!active(new Date()))return;
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))return;
   try{
-    const c=cfg(),a=access(c);let ok=0,failed=0;
-    for(const contract of c.contracts){
+    const c=cfg(), contracts=frontContracts(c),a=access(c);let ok=0,failed=0;
+    for(const contract of contracts){
       try{checkContract(c,a,contract);ok++;}catch(e){failed++;console.warn('Contract check failed (no secret values logged)');}
       Utilities.sleep(200);
     }
@@ -113,7 +168,7 @@ function radarTick(){
 // Run manually to verify Telegram and KIS connectivity without placing orders.
 // Test sends only a diagnostic, no quote details.
 function testRadar(){
-  const c=cfg();access(c);
+  const c=cfg();frontContracts(c);access(c);
   telegram(c,'HanaV Futures Radar: Telegram 발송 및 KIS 인증 성공. 장중 시세 조회는 별도 확인 필요.');
   console.log('Telegram and KIS authentication verified');
 }
