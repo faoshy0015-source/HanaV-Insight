@@ -339,7 +339,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
   function box(x,y,w,h,fill,outline=null,angle=0){
     const oid=newId(),co=Math.cos(angle),si=Math.sin(angle);
     requests.push({createShape:{objectId:oid,shapeType:'RECTANGLE',elementProperties:{pageObjectId:page,size:{width:dim(w*sx),height:dim(h*sy)},transform:{scaleX:co,scaleY:co,shearX:-si* sx/sy,shearY:si*sy/sx,translateX:offX+x*sx,translateY:offY+y*sy,unit:'PT'}}}});
-    const shapeProperties={shapeBackgroundFill:{solidFill:{color:rgb(fill),alpha:1}},outline:outline?{solidFill:{color:rgb(outline),alpha:1},weight:dim(0.8*sf),dashStyle:'SOLID'}:{propertyState:'NOT_RENDERED'}};
+    const shapeProperties={shapeBackgroundFill:{solidFill:{color:rgb(fill),alpha:1}},outline:outline?{outlineFill:{solidFill:{color:rgb(outline),alpha:1}},weight:dim(0.8*sf),dashStyle:'SOLID'}:{propertyState:'NOT_RENDERED'}};
     requests.push({updateShapeProperties:{objectId:oid,shapeProperties,fields:'shapeBackgroundFill,outline'}});
     return oid;
   }
