@@ -504,10 +504,17 @@ def _render_market_rising_rank(scope):
             if part.empty:
                 continue
             st.markdown(f"**{offset+1}~{offset+len(part)}위**")
-            view = part[["순위", "종목명", "등락률(%)"]].rename(columns={"등락률(%)": "상승률"})
+            # Keep both the name and change visible even in narrow dashboard columns.
+            # Combining rank and name removes one column; fixed pixel widths avoid
+            # Streamlit's 200px medium name column hiding the return at 258px.
+            view = pd.DataFrame({
+                "순위 · 종목명": [f"{int(rank):02d}  {name}" for rank, name in
+                               zip(part["순위"], part["종목명"])],
+                "상승률": part["등락률(%)"],
+            })
             def rank_style(row):
-                return ["background-color:#fff3dd;font-weight:700" if row["순위"] <= 3 else "",
-                        "font-weight:700" if row["순위"] <= 3 else "",
+                top = int(part.iloc[row.name]["순위"]) <= 3
+                return ["background-color:#fff3dd;font-weight:700" if top else "",
                         "color:#d93636;font-weight:700"]
             styled = view.style.apply(rank_style, axis=1).format({"상승률": "+{:.2f}%"})
             # Bind selection to this exact ordered set; a cache refresh must not
@@ -516,9 +523,8 @@ def _render_market_rising_rank(scope):
             selected = st.dataframe(
                 styled, hide_index=True, use_container_width=True,
                 height=35 * len(part) + 40,
-                column_config={"순위": st.column_config.NumberColumn(width="small"),
-                               "종목명": st.column_config.TextColumn(width="medium"),
-                               "상승률": st.column_config.NumberColumn(format="%+.2f%%", width="small")},
+                column_config={"순위 · 종목명": st.column_config.TextColumn(width=126),
+                               "상승률": st.column_config.NumberColumn(format="%+.2f%%", width=74)},
                 key=f"dashboard_rise_{scope}_{offset}_{version}_{order_id}",
                 on_select="rerun", selection_mode="single-row",
             )
