@@ -12,13 +12,15 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 import re
+import math
+import os
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from data_sources import SEED
+from data_sources import SEED, get_kis_access_token
 from sector_pulse import get_domestic_sector_pulse, _prices as _shared_sector_prices
 from trading_sidebar import public_market_quote
 from market_calendar import render_market_calendar
@@ -387,6 +389,151 @@ def _go_analyze(code):
     st.switch_page("stock_analyze.py")
 
 
+
+# Market-wide rank endpoint: at most 30 rows, no per-stock quote requests.
+# KIS v1_국내주식-088, FHPST01700000. Price class 1 = previous close.
+_RISE_MARKETS = {"전체": "0000", "KOSPI": "0001", "KOSDAQ": "1001"}
+
+
+def _rank_setting(name):
+    try:
+        value = st.secrets.get(name, "")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:
+        pass
+    return os.getenv(name, "").strip()
+
+
+@st.cache_data(ttl=72000, show_spinner=False, max_entries=4)
+def _rank_access_token(key, secret):
+    return get_kis_access_token(key, secret)
+
+
+def _parse_rising_rank(output):
+    if not isinstance(output, list):
+        raise ValueError("unexpected ranking response")
+    by_code = {}
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("stck_shrn_iscd") or "").strip().upper()
+        name = str(item.get("hts_kor_isnm") or "").strip()
+        pct = _num(item.get("prdy_ctrt"))
+        price = _num(item.get("stck_prpr"))
+        volume = _num(item.get("acml_vol"))
+        # Short codes may be alphanumeric; exclude Q-prefixed ETN.
+        if not re.fullmatch(r"[0-9A-Z]{6}", code) or code.startswith("Q") or not name:
+            continue
+        if not math.isfinite(pct) or pct <= 0 or not math.isfinite(price) or price <= 0:
+            continue
+        # Reject sign conflicts instead of converting a loss into a gain.
+        if str(item.get("prdy_vrss_sign") or "") in ("3", "4", "5"):
+            continue
+        by_code.setdefault(code, {
+            "종목코드": code, "종목명": name, "등락률(%)": pct,
+            "현재가(원)": int(price),
+            "누적 거래량(주)": int(volume) if math.isfinite(volume) and volume >= 0 else None,
+        })
+    rows = sorted(by_code.values(), key=lambda row: -row["등락률(%)"])[:30]
+    for i, row in enumerate(rows, 1):
+        row["순위"] = i
+    return rows
+
+
+@st.cache_data(ttl=120, show_spinner=False, max_entries=12)
+def _market_rising_rank(scope, key, secret):
+    # Keep error results cached too, to avoid repeated requests during reruns.
+    try:
+        access = _rank_access_token(key, secret)
+        if not access:
+            return [], _now_kst(), "KIS 인증 실패 · API 설정 확인"
+        response = requests.get(
+            "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/ranking/fluctuation",
+            headers={"authorization": "Bearer " + access, "appkey": key,
+                     "appsecret": secret, "tr_id": "FHPST01700000",
+                     "custtype": "P", "content-type": "application/json; charset=utf-8"},
+            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20170",
+                    "FID_INPUT_ISCD": _RISE_MARKETS[scope],
+                    "FID_RANK_SORT_CLS_CODE": "0", "FID_INPUT_CNT_1": "0",
+                    "FID_PRC_CLS_CODE": "1", "FID_INPUT_PRICE_1": "",
+                    "FID_INPUT_PRICE_2": "", "FID_VOL_CNT": "",
+                    "FID_TRGT_CLS_CODE": "0", "FID_TRGT_EXLS_CLS_CODE": "0000001100",
+                    "FID_DIV_CLS_CODE": "0", "FID_RSFL_RATE1": "", "FID_RSFL_RATE2": ""},
+            timeout=(3, 6),
+        )
+        if response.status_code != 200:
+            return [], _now_kst(), f"KIS 순위 조회 HTTP {response.status_code}"
+        payload = response.json()
+        if str(payload.get("rt_cd")) != "0":
+            msg = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("msg_cd", "")))[:24]
+            return [], _now_kst(), "KIS 순위 조회 실패" + (f" ({msg})" if msg else "")
+        rows = _parse_rising_rank(payload.get("output"))
+        if payload.get("output") and not rows:
+            return [], _now_kst(), "상승 종목을 확인하지 못했습니다. API 응답 또는 장 상태 확인"
+        return rows, _now_kst(), ""
+    except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+        return [], _now_kst(), "KIS 순위 시세 연결 또는 응답 오류"
+
+
+def _render_market_rising_rank(scope):
+    st.markdown("### 🔥 상승률 TOP 30")
+    st.caption(f"{'코스피 + 코스닥' if scope == '전체' else scope} · 전일 종가 대비 상승률순 · KIS KRX 주식 순위 (ETF·ETN 제외 요청)")
+    key, secret = _rank_setting("KIS_APP_KEY"), _rank_setting("KIS_APP_SECRET")
+    if not key or not secret:
+        st.caption("KIS API 설정이 필요합니다. 기존 대시보드와 ETF 히트맵은 계속 표시됩니다.")
+        return
+    rows, fetched, error = _market_rising_rank(scope, key, secret)
+    if error:
+        st.caption(error + " · 순위만 미표시, 나머지 대시보드는 유지됩니다.")
+        return
+    st.caption(f"조회 {fetched} · {len(rows)}개 상승 종목 · 2분 캐시 · 장 종료/휴장 시 최근 제공 시세")
+    if not rows:
+        st.caption("조회된 상승 종목이 없습니다.")
+        return
+    st.caption("종목 행을 선택하면 Analyze 상세 분석으로 이동합니다.")
+    frame = pd.DataFrame(rows)
+    version = st.session_state.get("dashboard_rise_rank_version", 0)
+    for col, offset in zip(st.columns(3, gap="small"), (0, 10, 20)):
+        with col:
+            part = frame.iloc[offset:offset + 10].reset_index(drop=True)
+            if part.empty:
+                continue
+            st.markdown(f"**{offset+1}~{offset+len(part)}위**")
+            view = part[["순위", "종목명", "등락률(%)"]].rename(columns={"등락률(%)": "상승률"})
+            def rank_style(row):
+                return ["background-color:#fff3dd;font-weight:700" if row["순위"] <= 3 else "",
+                        "font-weight:700" if row["순위"] <= 3 else "",
+                        "color:#d93636;font-weight:700"]
+            styled = view.style.apply(rank_style, axis=1).format({"상승률": "+{:.2f}%"})
+            selected = st.dataframe(
+                styled, hide_index=True, use_container_width=True,
+                height=35 * len(part) + 40,
+                column_config={"순위": st.column_config.NumberColumn(width="small"),
+                               "종목명": st.column_config.TextColumn(width="medium"),
+                               "상승률": st.column_config.NumberColumn(format="%+.2f%%", width="small")},
+                key=f"dashboard_rise_{scope}_{offset}_{version}",
+                on_select="rerun", selection_mode="single-row",
+            )
+            try:
+                picked = selected["selection"]["rows"]
+            except (TypeError, KeyError, AttributeError):
+                picked = []
+            if picked and 0 <= picked[0] < len(part):
+                code = str(part.iloc[picked[0]]["종목코드"])
+                st.session_state["dashboard_rise_rank_version"] = version + 1
+                _go_analyze(code)
+    with st.expander("상승률 TOP 30 · 현재가 및 거래량 보기", expanded=False):
+        st.dataframe(
+            frame[["순위", "종목명", "종목코드", "등락률(%)", "현재가(원)", "누적 거래량(주)"]],
+            hide_index=True, use_container_width=True, height=390,
+            column_config={"등락률(%)": st.column_config.NumberColumn(format="%+.2f%%"),
+                           "현재가(원)": st.column_config.NumberColumn(format="%d"),
+                           "누적 거래량(주)": st.column_config.NumberColumn(format="%d")},
+        )
+        st.caption("순위 API는 거래대금 항목을 제공하지 않아 누적 거래량만 표시합니다.")
+
+
 def _render_ranked(frame, title, positive=True):
     st.markdown("#### " + title)
     ordered = frame.sort_values("등락률(%)", ascending=not positive).head(6)
@@ -419,6 +566,7 @@ with c2:
     if st.button("🔄 최신 시세 새로고침", use_container_width=True,
                  key="stock_dashboard_refresh"):
         _market_quotes.clear()
+        _market_rising_rank.clear()
         public_market_quote.clear()
         _today_market_news.clear()
         _shared_sector_prices.clear()
@@ -432,7 +580,7 @@ st.caption(
     f"주요 종목 {len(BASKET)}개 중 {len(quotes)}개 시세 확인 · 2분 캐시"
 )
 st.caption(
-    "이 화면은 대표주 표본을 비교하며 전종목 상승률 순위나 공식 업종지수가 아닙니다. "
+    "아래 대표주 지표와 대표주 히트맵은 표본 비교이며 공식 업종지수가 아닙니다. 별도 상승률 TOP 30은 KIS 순위 기준입니다. "
     "조회 시각은 실제 체결시각이 아니고, 휴장·장 종료 시 마지막 제공 시세가 표시될 수 있습니다."
 )
 if quotes.empty:
@@ -499,6 +647,8 @@ st.markdown(
     '</div></div>',
     unsafe_allow_html=True,
 )
+
+_render_market_rising_rank(scope)
 
 st.subheader("🌐 ETF 업종 모멘텀 · 전체 테마 자동 반영")
 st.caption(
