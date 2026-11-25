@@ -390,6 +390,24 @@ function briefHistory(row){
   items.push({t:cur,p:row.s.p});
   return [...new Map(items.map(x=>[x.t,x])).values()].sort((a,b)=>a.t-b.t);
 }
+
+// Keep a compact session history (separate from short alert history).
+// Only actual validated quote timestamps and prices, no fabricated bars.
+function rememberBriefDay(row){
+  if(!row||!row.s||!/KOSPI\s*200/i.test(row.label))return;
+  const p=prop(),key='_BRIEF_DAY_KOSPI200',s=row.s,date=localTime(new Date(s.t),'yyyyMMdd');
+  const old=JSON.parse(p.getProperty(key)||'null');
+  const items=old&&old.date===date&&old.code===row.code?old.items:[];
+  const entries=[...new Map([...items,[s.t,s.p]].map(v=>[v[0],v])).values()].sort((a,b)=>a[0]-b[0]).slice(-110);
+  p.setProperty(key,JSON.stringify({date,code:row.code,items:entries}));
+}
+function briefDayHistory(row){
+  if(!row||!row.s)return [];
+  const s=row.s, date=localTime(new Date(s.t),'yyyyMMdd'),old=JSON.parse(prop().getProperty('_BRIEF_DAY_KOSPI200')||'null');
+  const samples=old&&old.date===date&&old.code===row.code?old.items.map(v=>({t:v[0],p:v[1]})):[];
+  return [...new Map([...samples,...briefHistory(row)].filter(v=>Number.isFinite(v.t)&&Number.isFinite(v.p)&&v.p>0&&v.t<=s.t&&localTime(new Date(v.t),'yyyyMMdd')===date).map(v=>[v.t,v])).values()].sort((a,b)=>a.t-b.t);
+}
+
 function briefSummary(quotes,flows,nq){
   const f=flows.find(x=>x.id==='F001'), cash=flows.find(x=>x.id==='0001');
   const direction=v=>!Number.isFinite(v)?'미확인':v>0?'순매수':v<0?'순매도':'보합';
@@ -413,8 +431,8 @@ function renderBriefImage(quotes,flows,nq,isTest){
   const W=toPt(doc.pageSize.width),H=toPt(doc.pageSize.height);
   if(!(W>0&&H>0))throw Error('Invalid canvas size');
   // Fit the portrait content onto the existing canvas without changing its page size.
-  const sf=Math.min(W/600,H/788),sx=sf,sy=sf;
-  const contentW=600*sx,contentH=788*sy,offX=(W-contentW)/2,offY=(H-contentH)/2;
+  const sf=Math.min(W/600,H/900),sx=sf,sy=sf;
+  const contentW=600*sx,contentH=900*sy,offX=(W-contentW)/2,offY=(H-contentH)/2;
   const now=new Date(), tag='hb_'+Date.now().toString(36)+'_',requests=[];
   let seq=0;
   for(const e of doc.slides[0].pageElements||[]){
@@ -455,11 +473,16 @@ function renderBriefImage(quotes,flows,nq,isTest){
     for(let i=1;i<coords.length;i++)if(points[i].t-points[i-1].t<=8*60000)line(...coords[i-1],...coords[i],color);
     txt('최근 '+Math.round(span/60000)+'분 · '+points.length+'회',x,y+h+3,w,14,8.5,MUTED,false,'CENTER');
   }
-  box(0,0,600,96,NAVY);box(21,20,5,54,'#1CD7BF');
-  txt('HanaV Futures Brief',36,12,360,23,15,'#BDEAE5',true);
-  txt('장중 선물·수급 브리핑',36,34,525,38,27,'#FFFFFF',true);
-  txt((isTest?'연동 테스트  |  ':'')+localTime(now,'yyyy.MM.dd HH:mm:ss')+' KST 조회',36,72,530,18,11,'#DDEAF3');
-  txt('01   주요 선물 시세',23,106,550,27,19,NAVY,true);
+  // White portal dashboard: quote cards -> investor flows -> market summary -> checks.
+  const BLUE='#2875E9',LIGHT='#F1F6FD',EDGE='#E0E7EF',PAPER='#FFFFFF';
+  box(0,0,600,900,'#F5F7FA');
+  box(0,0,600,112,PAPER);
+  [0,1,2].forEach(i=>box(20+i*8,22-i*4,5,12+i*4,i===2?'#85B6FF':BLUE));
+  txt('HanaV Insight',48,10,500,28,19,NAVY,true);
+  box(20,46,5,32,BLUE);
+  txt('원장님용 장중 선물·수급 브리핑',32,42,548,34,25,NAVY,true);
+  box(20,87,5,5,'#159447');
+  txt((isTest?'연동 테스트  |  ':'장중 브리핑  |  ')+localTime(now,'MM.dd HH:mm:ss')+' KST 조회',32,79,548,22,12,MUTED);
   const wanted=[
     {label:'KOSPI200 선물',row:quotes.find(r=>/KOSPI\s*200/i.test(r.label)),dec:2},
     {label:'삼성전자 선물',row:quotes.find(r=>/삼성전자/.test(r.label)),dec:0},
@@ -467,44 +490,88 @@ function renderBriefImage(quotes,flows,nq,isTest){
     {label:'나스닥100 선물',row:null,dec:2,overseas:true}
   ];
   wanted.forEach((m,i)=>{
-    const x=23+(i%2)*282,y=140+Math.floor(i/2)*112,w=272,h=102;
-    box(x,y,w,h,'#F8FAFC',BORDER);
-    txt(m.label,x+12,y+8,w-24,19,15,NAVY,true);
+    const x=16+i*143,y=122,w=139,h=116;
+    box(x,y,w,h,PAPER,i===0?'#A6C5EF':EDGE);
+    txt(m.label,x+7,y+7,w-14,20,i===2?12:13,NAVY,true);
     const s=m.overseas?nq:m.row&&m.row.s;
     const price=s?(m.overseas?s.price:s.p):null,pct=s?(m.overseas?s.pct:s.dayPct):null;
     const change=s?(m.overseas?s.diff:s.dayDiff):null;
-    txt(briefPrice(price,m.dec),x+12,y+28,164,34,price===null?19:25,INK,true);
-    txt((Number.isFinite(change)?briefSigned(change,m.dec)+'  ':'')+(Number.isFinite(pct)?'('+briefSigned(pct,2)+'%)':'등락률 미확인'),x+12,y+62,w-24,19,13,briefColor(pct),true);
+    txt(briefPrice(price,m.dec),x+7,y+27,w-14,28,price===null?18:22,INK,true);
+    const sign=Number.isFinite(pct)?(pct>0?'▲ ':pct<0?'▼ ':''):'';
+    const changeText=Number.isFinite(change)?briefPrice(Math.abs(change),m.dec)+' ':'';
+    txt(Number.isFinite(pct)?sign+changeText+'('+briefSigned(pct,2)+'%)':'등락률 미확인',x+7,y+55,w-14,17,11,briefColor(pct),true);
     if(m.overseas){
-      txt(s?'처리 '+String(s.stamp).replace(/[^0-9 :\-]/g,'').slice(0,22)+' · 지연 미확인':'CME API 시세 권한 확인 필요',x+12,y+82,w-24,15,9,MUTED);
-    }else{
-      if(s)spark(briefHistory(m.row),x+181,y+30,79,26);
-      txt(s?m.row.code+'  |  '+localTime(new Date(s.t),'HH:mm:ss'):'시세 조회 실패',x+12,y+82,w-24,15,9,MUTED);
-    }
+      txt(s?'처리 '+String(s.stamp).slice(9,15):'시세 미수신',x+7,y+77,w-14,17,10,MUTED);
+      txt(s?'지연 여부 미확인':'CME 권한 확인 필요',x+7,y+95,w-14,16,9,MUTED);
+    }else if(s){
+      spark(briefHistory(m.row),x+9,y+77,w-18,19);
+    }else txt('시세 조회 실패',x+7,y+80,w-14,20,10,MUTED);
   });
-  txt('02   투자주체별 당일 순매수',23,364,550,28,19,NAVY,true);
+  // Same investor flow fields, column order, and monetary divisor as R6.
+  box(16,250,568,272,PAPER,EDGE);
+  box(28,263,5,19,BLUE);
+  txt('투자주체별 수급',40,258,534,29,20,NAVY,true);
   const {divisor,verified:amountVerified}=flowAmountConfig();
-  const xs=[23,202,327,452],ws=[179,125,125,125],top=400,rh=39;
-  ['구분','외국인','기관','개인'].forEach((label,i)=>{box(xs[i],top,ws[i],34,NAVY);txt(label,xs[i]+4,top+4,ws[i]-8,26,15,'#FFFFFF',true,'CENTER');});
+  const xs=[28,188,316,444],ws=[160,128,128,128],top=294,rh=36;
+  box(28,top,544,31,'#EAF0F7');
+  ['구분','외국인','기관','개인'].forEach((label,i)=>txt(label,xs[i]+5,top+3,ws[i]-10,25,14,NAVY,true,i===0?'START':'CENTER'));
   FLOW_MARKETS.forEach((m,i)=>{
-    const y=top+34+i*rh,f=flows.find(v=>v.id===m[2]),cash=m[2]==='0001';
-    const name=cash?'코스피 현물':m[2]==='F001'?'코스피200 선물':m[0];
+    const y=top+31+i*rh,f=flows.find(v=>v.id===m[2]),cash=m[2]==='0001';
+    const name=cash?'코스피 현물':m[2]==='F001'?'지수선물':m[0];
     const unit=cash?(amountVerified?'억원':'억원*'):'계약';
-    box(xs[0],y,ws[0],rh,i%2?'#F2F6FA':'#F8FAFC',BORDER);
-    txt(name,xs[0]+9,y+3,ws[0]-18,20,13.5,INK,true);
-    txt(unit,xs[0]+9,y+22,ws[0]-18,13,9,MUTED);
+    if(i%2)box(28,y,544,rh,'#F8FAFC');
+    box(28,y+rh-1,544,0.65,EDGE);
+    txt(name,xs[0]+5,y+2,ws[0]-10,19,13.5,INK,true);
+    txt(unit,xs[0]+5,y+20,ws[0]-10,13,9,MUTED);
     for(let j=0;j<3;j++){
       const val=f?(cash?(f.amount[j]===null?null:f.amount[j]/divisor):f.q[j]):null;
-      box(xs[j+1],y,ws[j+1],rh,i%2?'#F2F6FA':'#FFFFFF',BORDER);
       const value=briefSigned(val,0);
-      txt(value,xs[j+1]+3,y+4,ws[j+1]-6,rh-8,value.length>12?10.5:value.length>9?13:17,briefColor(val),true,'END');
+      txt(value,xs[j+1]+4,y+5,ws[j+1]-8,26,value.length>12?10.5:value.length>9?13:17,briefColor(val),true,'END');
     }
   });
-  txt('03   핵심 시황',23,638,554,25,19,NAVY,true);
-  box(23,668,554,69,'#E8F5F3');
-  briefSummary(quotes,flows,nq).forEach((s,i)=>{box(34,679+i*19,5,5,TEAL);txt(s,48,671+i*19,515,19,12,INK,true);});
-  txt('출처: KIS Open API  |  수급 집계 기준시각 미제공 · 조회값 기준',23,744,554,16,10,MUTED);
-  txt(amountVerified?'장중 수치는 변동 가능 · 투자자별 포지션 추정 아님':'* 현물 원값 ÷100 잠정 환산 · HTS 대조 필요 · 지연 가능',23,761,554,15,9,MUTED);
+  // Evidence-based summary and full-session sampled KOSPI200 chart.
+  box(16,534,568,228,PAPER,EDGE);
+  box(28,548,5,19,BLUE);
+  txt('오늘 시장 한눈에',40,542,532,29,20,NAVY,true);
+  const indexRow=wanted[0].row, idx=indexRow&&indexRow.s;
+  const foreign=flows.find(f=>f.id==='F001'), fv=foreign?foreign.q[0]:null;
+  const direction=Number.isFinite(fv)?fv>0?'외국인 선물 순매수':fv<0?'외국인 선물 순매도':'외국인 선물 순매수 0':'외국인 선물 수급 미확인';
+  const indexDirection=idx&&Number.isFinite(idx.dayPct)?'코스피200 선물 '+briefSigned(idx.dayPct,2)+'%':'코스피200 선물 시세 미확인';
+  txt(indexDirection+' · '+direction,28,574,544,27,17,INK,true);
+  const lines=briefSummary(quotes,flows,nq);
+  lines.forEach((s,i)=>{box(30,615+i*40,5,5,BLUE);txt(s,41,606+i*40,224,37,12,INK);});
+  box(276,606,296,145,'#FAFCFF',EDGE);
+  txt('KOSPI200 선물 · 장중 수집 시세',285,610,279,21,12,NAVY,true);
+  const hist=briefDayHistory(indexRow);
+  const px=287,py=640,pw=228,ph=77;
+  if(hist.length>=3&&hist[hist.length-1].t>hist[0].t){
+    const first=hist[0],last=hist[hist.length-1],span=last.t-first.t;
+    let low=Math.min(...hist.map(a=>a.p)),high=Math.max(...hist.map(a=>a.p));
+    const pad=Math.max((high-low)*0.08,0.05),ymin=low-pad,ymax=high+pad;
+    const yp=v=>py+ph*(1-(v-ymin)/(ymax-ymin)),xp=t=>px+pw*(t-first.t)/span;
+    for(let k=0;k<3;k++){
+      const v=ymax-(ymax-ymin)*k/2,yy=py+ph*k/2;
+      box(px,yy,pw,0.5,'#DEE7F1');
+      txt(v.toFixed(2),px+pw+3,yy-6,48,13,9,MUTED,false,'END');
+    }
+    const color=briefColor(idx&&Number.isFinite(idx.dayPct)?idx.dayPct:last.p-first.p);
+    for(let j=1;j<hist.length;j++)if(hist[j].t-hist[j-1].t<=8*60000)line(xp(hist[j-1].t),yp(hist[j-1].p),xp(hist[j].t),yp(hist[j].p),color);
+    box(xp(last.t)-1.5,yp(last.p)-1.5,3,3,color);
+    txt(localTime(new Date(first.t),'HH:mm'),px,py+ph+3,68,13,9,MUTED);
+    txt(localTime(new Date(last.t),'HH:mm'),px+pw-68,py+ph+3,68,13,9,MUTED,false,'END');
+    txt('수집 고가 '+high.toFixed(2)+' / 저가 '+low.toFixed(2),px,735,278,13,9,MUTED);
+  }else txt('장중 데이터 수집 중',285,657,279,30,13,MUTED,false,'CENTER');
+  box(16,774,568,86,PAPER,EDGE);
+  box(28,786,5,18,BLUE);
+  txt('체크포인트',40,779,534,26,18,NAVY,true);
+  const checks=[
+    Number.isFinite(fv)&&fv!==0?'외국인 지수선물 '+(fv>0?'매수':'매도')+' 우위 지속 여부 확인':'외국인 지수선물 수급 방향 확인',
+    '반도체 선물과 코스피 현물 수급 동조 여부 확인',
+    nq?'나스닥 선물 방향 및 국내 선물 변동성 확인':'나스닥 선물 공식 시세 및 지연 여부 확인'
+  ];
+  checks.forEach((s,i)=>{box(29,810+i*15,5,5,BLUE);txt(s,42,804+i*15,528,16,11,INK);});
+  txt('출처: KIS Open API  |  수급 집계 기준시각 미제공 · 조회값 기준',22,869,556,14,9,MUTED);
+  txt(amountVerified?'장중 수치는 변동 가능 · 투자자별 포지션 추정 아님':'* 현물 원값 ÷100 잠정 환산 · HTS 대조 필요 · 시세 지연 가능',22,883,556,14,9,MUTED);
   // Send the exact field masks as JSON, without advanced-service serialization.
   const result=UrlFetchApp.fetch('https://slides.googleapis.com/v1/presentations/'+encodeURIComponent(id)+':batchUpdate',{
     method:'post',contentType:'application/json',headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken()},
@@ -513,7 +580,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
     let detail='';try{detail=String(JSON.parse(result.getContentText()).error.message||'').slice(0,350);}catch(e){}
     throw Error('Slides batch HTTP '+result.getResponseCode()+': '+detail);
   }
-  console.log('R6: Slides drawing complete');
+  console.log('R7: Slides drawing complete');
   const thumbnail=Slides.Presentations.Pages.getThumbnail(id,page,{'thumbnailProperties.mimeType':'PNG','thumbnailProperties.thumbnailSize':'LARGE'});
   if(!thumbnail.contentUrl)throw Error('Brief thumbnail missing');
   const image=UrlFetchApp.fetch(thumbnail.contentUrl,{muteHttpExceptions:true});
@@ -546,12 +613,13 @@ function disableMarketBrief(){
 }
 
 function testMarketBrief(){
-  console.log('HanaV image build: 2026-11-25-R6');
+  console.log('HanaV image build: 2026-11-25-R7');
   if(!active(new Date()))throw Error('Run during weekday 08:45–15:45 KST');
   const lock=LockService.getScriptLock();if(!lock.tryLock(1000))throw Error('Radar is already running; retry');
   try{
     const c=cfg(),a=access(c),contracts=frontContracts(c);
     const quotes=contracts.map(x=>{let s=null;try{s=quote(c,a,x);}catch(e){console.warn(x[2]+' quote unavailable');}return {market:x[0],label:x[2],code:x[1],s};});
+    quotes.forEach(rememberBriefDay);
     const flows=readFlows(c,a),nq=readNasdaq(c,a);
     console.log('Verified responses: domestic '+quotes.filter(x=>x.s).length+'/'+quotes.length+', investor flows '+flows.length+'/5, Nasdaq '+(nq?'1/1':'0/1'));
     prop().deleteProperty('_BRIEF_IMAGE_TEST_OK');
@@ -570,6 +638,7 @@ function radarTick(){
       let s=null;
       try{s=quote(c,a,contract);ok++;}catch(e){failed++;console.warn('Contract check failed (no secret values logged)');}
       quotes.push({market:contract[0],label:contract[2],code:contract[1],s});
+      if(s)try{rememberBriefDay(quotes[quotes.length-1]);}catch(e){console.warn('Session chart history unavailable');}
       if(s)try{checkContract(c,a,contract,s);}catch(e){console.warn('Contract event delivery failed');}
       Utilities.sleep(200);
     }
