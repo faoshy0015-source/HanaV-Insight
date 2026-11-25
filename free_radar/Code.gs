@@ -346,7 +346,7 @@ function renderBriefImage(quotes,flows,nq,isTest){
   function txt(s,x,y,w,h,size=14,color=INK,bold=false,align='START'){
     const oid=newId();
     requests.push({createShape:{objectId:oid,shapeType:'TEXT_BOX',elementProperties:{pageObjectId:page,size:{width:dim((w+8)*sx),height:dim((h+8)*sy)},transform:{scaleX:1,scaleY:1,translateX:offX+(x-4)*sx,translateY:offY+(y-4)*sy,unit:'PT'}}}});
-    requests.push({updateShapeProperties:{objectId:oid,shapeProperties:{contentAlignment:'MIDDLE',autofit:{autofitType:'NONE'},shapeBackgroundFill:{propertyState:'NOT_RENDERED'},outline:{propertyState:'NOT_RENDERED'}},fields:'contentAlignment,autofit.autofitType,shapeBackgroundFill.propertyState,outline.propertyState'}});
+    requests.push({updateShapeProperties:{objectId:oid,shapeProperties:{contentAlignment:'MIDDLE'},fields:'contentAlignment'}});
     requests.push({insertText:{objectId:oid,text:String(s)}});
     requests.push({updateTextStyle:{objectId:oid,textRange:{type:'ALL'},style:{fontFamily:'Noto Sans KR',fontSize:dim(size*sf),bold,foregroundColor:{opaqueColor:rgb(color)}},fields:'fontFamily,fontSize,bold,foregroundColor'}});
     requests.push({updateParagraphStyle:{objectId:oid,textRange:{type:'ALL'},style:{alignment:align,spaceAbove:dim(0),spaceBelow:dim(0),lineSpacing:100},fields:'alignment,spaceAbove,spaceBelow,lineSpacing'}});
