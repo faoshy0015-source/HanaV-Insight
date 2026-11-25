@@ -506,13 +506,16 @@ def _render_market_rising_rank(scope):
                         "font-weight:700" if row["순위"] <= 3 else "",
                         "color:#d93636;font-weight:700"]
             styled = view.style.apply(rank_style, axis=1).format({"상승률": "+{:.2f}%"})
+            # Bind selection to this exact ordered set; a cache refresh must not
+            # reinterpret a click on a now-reordered row as a different stock.
+            order_id = "_".join(part["종목코드"].astype(str))
             selected = st.dataframe(
                 styled, hide_index=True, use_container_width=True,
                 height=35 * len(part) + 40,
                 column_config={"순위": st.column_config.NumberColumn(width="small"),
                                "종목명": st.column_config.TextColumn(width="medium"),
                                "상승률": st.column_config.NumberColumn(format="%+.2f%%", width="small")},
-                key=f"dashboard_rise_{scope}_{offset}_{version}",
+                key=f"dashboard_rise_{scope}_{offset}_{version}_{order_id}",
                 on_select="rerun", selection_mode="single-row",
             )
             try:
