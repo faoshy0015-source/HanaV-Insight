@@ -7,7 +7,7 @@ on:
       preview:
         description: 'Preview only (no Telegram message)'
         type: boolean
-        default: true
+        default: false
 permissions:
   contents: read
 concurrency:
