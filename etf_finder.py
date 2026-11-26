@@ -7,7 +7,7 @@ import re
 import requests
 import sqlite3
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 st.markdown('''
 <style>
@@ -1382,22 +1382,41 @@ def _import_pykrx():
         raise RuntimeError(f'pykrx 로딩 실패: {e}') from e
 
 def _candidate_dates(days=12):
-    d=datetime.now()
+    d=datetime.now(timezone(timedelta(hours=9)))
     for _ in range(days):
         if d.weekday()<5: yield d.strftime('%Y%m%d')
         d-=timedelta(days=1)
 
-def _find_latest_market_date(stock):
-    last_error=None
+def _find_latest_market_date(stock, minimum_date=''):
+    # An ETF listing alone does not establish availability of daily holdings.
+    # Check representative funds before running the expensive full collection.
+    checked=[]
     for ds in _candidate_dates(20):
+        if minimum_date and ds < minimum_date:
+            break
         try:
-            tickers=stock.get_etf_ticker_list(ds)
-            if tickers:
-                return ds,list(tickers)
-        except Exception as e:
-            last_error=e
-    msg=str(last_error or '데이터 없음')
-    raise RuntimeError(f'최근 ETF 기준일을 확인하지 못했습니다: {msg}')
+            tickers=list(stock.get_etf_ticker_list(ds) or [])
+            if not tickers:
+                checked.append(ds+': 목록 없음')
+                continue
+            codes=[str(t).zfill(6) for t in tickers]
+            probes=[t for t in ('069500','102110','229200','148020','278530') if t in codes][:3]
+            if len(probes)<2:
+                probes=list(dict.fromkeys(probes+codes[:3]))[:3]
+            valid=0
+            for ticker in probes:
+                try:
+                    pdf=_get_etf_pdf(stock,ticker,ds)
+                    if pdf is not None and not pdf.empty:
+                        valid+=1
+                except Exception:
+                    pass
+            if valid>=min(2,len(probes)) and valid>0:
+                return ds,tickers
+            checked.append(ds+': 구성종목 미수신')
+        except Exception:
+            checked.append(ds+': 조회 실패')
+    raise RuntimeError('최신 KRX ETF 구성종목 기준일을 확인하지 못했습니다. 기존 DB 유지. 확인 결과: '+', '.join(checked[:8]))
 
 def _pick_col(df,candidates):
     for c in candidates:
@@ -1435,11 +1454,11 @@ def _get_etf_pdf(stock, ticker, asof):
             errors.append(f"{args}: {e}")
     raise RuntimeError("ETF PDF 조회 실패 · " + " | ".join(errors))
 
-def collect_krx_etf_snapshot(progress=None,pause=0.05):
+def collect_krx_etf_snapshot(progress=None,pause=0.05,market_snapshot=None):
     _etf_require_write()
     stock,collector_mode=_import_pykrx()
-    asof,tickers=_find_latest_market_date(stock)
-    collected_at=datetime.now().isoformat(timespec='seconds')
+    asof,tickers=market_snapshot or _find_latest_market_date(stock)
+    collected_at=datetime.now(timezone(timedelta(hours=9))).isoformat(timespec='seconds')
     master_rows=[]; holding_rows=[]; failures=[]
     try:
         ohlcv=stock.get_etf_ohlcv_by_ticker(asof)
@@ -1452,6 +1471,7 @@ def collect_krx_etf_snapshot(progress=None,pause=0.05):
 
     for i,ticker in enumerate(tickers,1):
         ticker=str(ticker).zfill(6)
+        pending_holdings=[]
         try:
             name=stock.get_etf_ticker_name(ticker) or ticker
             turnover=None
@@ -1494,7 +1514,7 @@ def collect_krx_etf_snapshot(progress=None,pause=0.05):
                     w=(_num(row.get(amount_col)) or 0.0)/amount_total*100.0
                 q=_num(row.get(qty_col)) if qty_col else None
 
-                holding_rows.append({
+                pending_holdings.append({
                     'etf_code':ticker,'holding_code':hcode,'holding_name':hname,
                     'weight':round(float(w or 0),6),'quantity':q,'as_of':asof,
                     'source':'KRX PDF (Portfolio Deposit File)',
@@ -1505,6 +1525,7 @@ def collect_krx_etf_snapshot(progress=None,pause=0.05):
             if not valid:
                 raise RuntimeError('유효 구성종목 없음')
 
+            holding_rows.extend(pending_holdings)
             master_rows.append({
                 'etf_code':ticker,'etf_name':name,'issuer':'',
                 'asset_region':'','asset_class':'','sector':'','subsector':'',
@@ -1517,7 +1538,7 @@ def collect_krx_etf_snapshot(progress=None,pause=0.05):
         except Exception as e:
             failures.append({'etf_code':ticker,'error':str(e)[:600]})
             consecutive_failures+=1
-            if not master_rows and consecutive_failures>=fail_fast_limit:
+            if consecutive_failures>=fail_fast_limit and (not master_rows or consecutive_failures>=fail_fast_limit*3):
                 if progress:
                     progress(i,total,ticker,len(failures))
                 sample=' / '.join(
@@ -1525,7 +1546,7 @@ def collect_krx_etf_snapshot(progress=None,pause=0.05):
                 )
                 raise RuntimeError(
                     f'ETF 목록 {total:,}개는 조회됐지만 구성종목 조회가 '
-                    f'연속 {fail_fast_limit}건 실패해 중단했습니다. 최근 오류: {sample}'
+                    f'연속 {consecutive_failures}건 실패해 중단했습니다. 최근 오류: {sample}'
                 )
 
         if progress:
@@ -1539,22 +1560,16 @@ def collect_krx_etf_snapshot(progress=None,pause=0.05):
     if master.empty or holdings.empty:
         raise RuntimeError('수집 결과가 비어 있어 기존 DB를 변경하지 않았습니다.')
 
-    mt=MASTER_FILE.with_suffix('.tmp')
-    ht=HOLDINGS_FILE.with_suffix('.tmp')
-    master.to_csv(mt,index=False,encoding='utf-8-sig')
-    holdings.to_csv(ht,index=False,encoding='utf-8-sig')
-    mt.replace(MASTER_FILE)
-    ht.replace(HOLDINGS_FILE)
-
+    # Do not replace the last good DB with a heavily incomplete collection.
+    if len(master)/max(total,1)<0.95:
+        raise RuntimeError(f'수집률 {len(master)/max(total,1):.1%} ({len(master):,}/{total:,})로 95% 미만입니다. 기존 DB를 유지합니다.')
     status={
         'as_of':asof,'collected_at':collected_at,'total_etfs':total,
         'success_etfs':len(master),'failed_etfs':len(failures),
         'holding_rows':len(holdings),'failures':failures,
         'source':f'KRX Data Marketplace / PDF (Portfolio Deposit File) · {collector_mode}'
     }
-    STATUS_FILE.write_text(
-        json.dumps(status,ensure_ascii=False,indent=2),encoding='utf-8'
-    )
+    # SQLite is the authoritative snapshot. Write only after validation in save_local_db.
     return master,holdings,status
 
 
@@ -1904,14 +1919,19 @@ def db_available():
 
 
 def db_token():
-    try:
-        return DB_FILE.stat().st_mtime_ns
-    except Exception:
-        return 0
+    # WAL changes can precede the main database mtime. Include both file states.
+    result=[]
+    for path in (DB_FILE,Path(str(DB_FILE)+'-wal')):
+        try:
+            stat=path.stat()
+            result.extend((stat.st_mtime_ns,stat.st_size))
+        except OSError:
+            result.extend((0,0))
+    return tuple(result)
 
 
 @st.cache_data(show_spinner=False)
-def load_master_db(_token):
+def load_master_db(token):
     if not db_available():
         return pd.DataFrame(columns=ETF_COLUMNS)
     with _db_connect() as conn:
@@ -1922,7 +1942,7 @@ def load_master_db(_token):
 
 
 @st.cache_data(show_spinner=False)
-def load_holdings_preview_db(_token,limit=500):
+def load_holdings_preview_db(token,limit=500):
     if not db_available():
         return pd.DataFrame(columns=HOLDING_COLUMNS)
     with _db_connect() as conn:
@@ -2391,7 +2411,7 @@ def search_theme_db(region,asset,sector,subsector):
 # =========================================================
 
 @st.cache_data(show_spinner=False)
-def get_etf_holdings_local(etf_code,_db_token):
+def get_etf_holdings_local(etf_code,db_version):
     if not db_available():
         return pd.DataFrame(columns=HOLDING_COLUMNS)
 
@@ -2410,7 +2430,7 @@ def get_etf_holdings_local(etf_code,_db_token):
 
 
 @st.cache_data(show_spinner=False)
-def get_etf_master_local(etf_code,_db_token):
+def get_etf_master_local(etf_code,db_version):
     if not db_available():
         return {}
 
@@ -3061,8 +3081,14 @@ try:
                 _r=_c.execute("SELECT value FROM etf_sync_meta WHERE key='collection_status'").fetchone()
                 if _r:
                     _status=json.loads(_r[0])
-    if not _status and STATUS_FILE.exists():
-        _status=json.loads(STATUS_FILE.read_text(encoding='utf-8'))
+    if db_available():
+        with _db_connect() as _c:
+            _basis=_c.execute("SELECT MIN(as_of),MAX(as_of),MAX(collected_at) FROM etf_master").fetchone()
+        if _basis and _basis[1]:
+            _status['as_of']=str(_basis[1])
+            _status['collected_at']=str(_basis[2] or '')
+            if _basis[0]!=_basis[1]:
+                _status['mixed_dates']=True
 except Exception:
     _status={}
 
@@ -3662,6 +3688,21 @@ with st.container(key='db_summary_cards'):
     _s3.metric('기준일',_status.get('as_of','-'))
     _s4.metric('DB 방식','SQLite')
 
+if _status.get('collected_at'):
+    st.caption('실제 DB 수집 시각: '+str(_status['collected_at']))
+if _status.get('mixed_dates'):
+    st.warning('DB에 서로 다른 기준일이 섞여 있습니다.')
+try:
+    _basis_age=(datetime.now(timezone(timedelta(hours=9))).date()-datetime.strptime(str(_status.get('as_of','')),'%Y%m%d').date()).days
+    if _basis_age>4:
+        st.warning(f"ETF 구성종목 DB 기준일이 {_basis_age}일 전입니다. 최신 시세와 별개이며 아래 KRX 업데이트 결과를 확인하세요.")
+except (TypeError,ValueError):
+    pass
+if st.session_state.get('_etf_update_result'):
+    _last=st.session_state['_etf_update_result']
+    _display={'success':st.success,'warning':st.warning,'error':st.error}.get(_last['level'],st.info)
+    _display(_last['message'])
+
 if _migrated:
     st.success('기존 CSV 데이터를 로컬 SQLite DB로 자동 변환했습니다. KRX 재조회는 하지 않았습니다.')
 
@@ -3705,6 +3746,8 @@ with st.expander('🔄 KRX에서 로컬 DB 새로고침',expanded=not db_availab
         '저장 완료 후 종목검색·테크트리·ETF 조회는 모두 로컬 DB에서 실행됩니다.'
     )
 
+    _same_date=st.checkbox('동일 기준일도 다시 수집 (기존 DB 보완용)',value=False,key='_etf_force_same_date')
+    st.caption('관리자 비밀번호 입력 후 인증 후 실행을 눌러야 실제 수집합니다. 최신 구성종목을 확인한 후에만 기존 DB를 교체합니다.')
     if _etf_admin_button('KRX 전체 데이터로 로컬 DB 업데이트', 'krx_update',
                          button_type='primary', use_container_width=True):
         with _etf_authorized_write('krx_update'):
@@ -3720,22 +3763,53 @@ with st.expander('🔄 KRX에서 로컬 DB 새로고침',expanded=not db_availab
                     text=f'{i:,}/{total:,} · {ticker} · 실패 {failed:,}건'
                 )
 
+            st.session_state.pop('_etf_update_result',None)
+            _old_basis=str(_status.get('as_of','') or '')
+            _local_saved=False
             try:
-                _m,_h,_status=collect_krx_etf_snapshot(progress=_progress)
-                save_local_db(_m,_h,status=_status)
-                _cloud_ok=_db_cloud_push()
+                stock,_mode=_import_pykrx()
+                _new_basis,_tickers=_find_latest_market_date(stock,minimum_date=_old_basis)
+                if _old_basis and _new_basis<_old_basis:
+                    raise RuntimeError('KRX 기준일이 기존 DB보다 과거입니다. 기존 DB 유지.')
+                if _old_basis==_new_basis and not _same_date:
+                    st.session_state['_etf_update_result']={'level':'warning','message':f'KRX 구성종목 확인 결과: {_new_basis}. 기존 DB와 동일한 기준일이라 재수집하지 않았습니다. 더 최신 자료는 아직 확인되지 않았습니다.'}
+                    bar.empty()
+                    st.rerun()
+                _m,_h,_new_status=collect_krx_etf_snapshot(progress=_progress,market_snapshot=(_new_basis,_tickers))
+                save_local_db(_m,_h,status=_new_status)
+                _local_saved=True
+                with _db_connect() as _verify:
+                    _saved=_verify.execute("SELECT MIN(as_of),MAX(as_of),COUNT(*) FROM etf_master").fetchone()
+                    _saved_h=_verify.execute("SELECT MIN(as_of),MAX(as_of),COUNT(*) FROM etf_holdings").fetchone()
+                if _saved!=(_new_basis,_new_basis,len(_m)) or _saved_h!=(_new_basis,_new_basis,len(_h)):
+                    raise RuntimeError('저장 후 기준일 또는 건수 확인 불일치')
+                _notes=[]
+                try:
+                    ensure_theme_map(force=True)
+                except Exception:
+                    _notes.append('테마 매핑 재생성 실패: 별도 재생성 필요')
+                try:
+                    _cloud_configured=bool(_db_cloud_config())
+                    if _cloud_configured:
+                        _cloud_ok=_db_cloud_push()
+                        _notes.append('클라우드 백업 완료' if _cloud_ok else '클라우드 백업 실패: 재부팅 전 영구 저장 확인')
+                    else:
+                        _notes.append('클라우드 미설정: 재배포 전 DB 다운로드 권장')
+                except Exception:
+                    _notes.append('클라우드 설정 오류: 로컬 DB만 저장')
                 st.cache_data.clear()
-                if _db_cloud_config() and not _cloud_ok:
-                    st.warning('클라우드 저장에 실패했습니다. 지금 서버에서는 검색할 수 있지만 재부팅 전에 백업 설정을 확인해 주세요.')
-
-                bar.progress(1.0,text='로컬 DB 저장 완료')
-                st.success(
-                    f"기준일 {_status['as_of']} · ETF {_status['success_etfs']:,}개 · "
-                    f"구성종목 {_status['holding_rows']:,}건을 etf_finder.db에 저장했습니다."
-                )
+                bar.progress(1.0,text='로컬 DB 저장 및 검증 완료')
+                _level='warning' if _new_status['failed_etfs'] or any(x for x in _notes if '실패' in x or '미설정' in x or '오류' in x) else 'success'
+                _message=f"DB 업데이트 완료: {_old_basis or '-'} → {_new_basis} · ETF {_saved[2]:,}/{_new_status['total_etfs']:,}개 · 구성종목 {_saved_h[2]:,}건 · 실패 {_new_status['failed_etfs']:,}건"
+                st.session_state['_etf_update_result']={'level':_level,'message':_message+' · '+' / '.join(_notes)}
                 st.rerun()
             except Exception as e:
-                st.error(f'업데이트 실패: {e}')
+                if _local_saved:
+                    st.cache_data.clear()
+                _message=f"업데이트 실패: {e}" + (' · 로컬 DB 저장 후 오류: 실제 기준일을 확인하세요.' if _local_saved else ' · 기존 DB 유지')
+                st.session_state['_etf_update_result']={'level':'error','message':_message}
+                st.error(_message)
+
 
 st.divider()
 
