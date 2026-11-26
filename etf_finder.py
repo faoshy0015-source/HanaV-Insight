@@ -1712,6 +1712,7 @@ def _db_valid_snapshot(raw):
             holdings_count = conn.execute('SELECT COUNT(*) FROM etf_holdings').fetchone()[0]
             if etf_count < 1 or holdings_count < 1:
                 raise ValueError('ETF 또는 구성종목이 0건인 DB는 백업/복원하지 않습니다.')
+            return str(conn.execute("SELECT COALESCE(MAX(as_of),'') FROM etf_master").fetchone()[0] or '')
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -1790,6 +1791,13 @@ def _db_cloud_restore_on_boot():
             # No implicit writes to remote Storage. Only approved user actions may back up.
             return 'remote_empty'
         response.raise_for_status()
+        remote_basis=_db_valid_snapshot(response.content)
+        if db_available():
+            with _db_connect() as conn:
+                local_basis=str(conn.execute("SELECT COALESCE(MAX(as_of),'') FROM etf_master").fetchone()[0] or '')
+            if local_basis and (not remote_basis or local_basis>remote_basis):
+                st.session_state['_db_cloud_error']='클라우드 백업 기준일('+str(remote_basis or '미확인')+')이 현재 로컬 DB('+local_basis+')보다 오래되어 로컬 DB를 유지합니다. 영구 저장을 다시 확인하세요.'
+                return 'local_newer'
         _db_install_snapshot(response.content)
         return 'restored'
     except Exception as exc:
