@@ -17,7 +17,7 @@ def setting(name):
         pass
     return os.getenv(name,"").strip()
 
-@st.cache_data(ttl=60,show_spinner=False,max_entries=12)
+@st.cache_data(ttl=30,show_spinner=False,max_entries=12)
 def latest(key,media,licensed,days):
     return collect(key,media,licensed,days)
 
@@ -187,7 +187,9 @@ if submit and stock_query.strip():
     match=data[(data["code"].astype(str)==s)|(data["name"].astype(str).str.casefold()==s.casefold())]
     if match.empty:
         match=data[data["name"].astype(str).str.contains(s,case=False,regex=False)].head(10)
-    if match.empty: st.warning("종목을 찾지 못했습니다. 정확한 종목명 또는 코드를 입력하세요.")
+    if match.empty:
+        st.session_state.pop("news_stock_matches",None)
+        st.warning("종목을 찾지 못했습니다. 정확한 종목명 또는 코드를 입력하세요.")
     else: st.session_state["news_stock_matches"]=match.to_dict("records")
 matches=st.session_state.get("news_stock_matches",[])
 if matches:
