@@ -1,6 +1,8 @@
 """News Center page, routed by the authenticated HanaV Insight entrypoint."""
 import os
 import re
+from html import escape
+from urllib.parse import urlsplit
 from collections import Counter
 from datetime import datetime
 
@@ -66,15 +68,51 @@ def related(row):
     title=row["title"].lower()
     return ", ".join(name+" ("+code+")" for name,code in WATCH.items() if name.lower() in title)
 
-def frame(rows):
-    return pd.DataFrame([{"발행(KST)":show_time(r),"분류":r["category"],
-        "중요":("🔴" if r["score"]>=4 else "🟠" if r["score"]==3 else ""),
-        "제목":r["title"],"출처":r["source"],"관련 종목":related(r),
-        "테마":", ".join(r["themes"]),"유사":r["duplicates"]-1,"원문":r["link"]} for r in rows],
-        columns=["발행(KST)","분류","중요","제목","출처","관련 종목","테마","유사","원문"])
+def news_table(rows):
+    """Compact HTS-style feed with escaped, directly clickable article titles."""
+    def esc(value):
+        return escape(str(value or ""),quote=True)
+    lines=[]
+    for r in rows:
+        title=esc(r["title"])
+        url=str(r.get("link") or "")
+        try:
+            parsed=urlsplit(url)
+            valid=parsed.scheme in ("https","http") and bool(parsed.hostname) and not parsed.username and not parsed.password and not any(ord(ch)<32 for ch in url)
+        except ValueError:
+            valid=False
+        if valid:
+            href=esc(url)
+            title=f'<a class="nc-title" href="{href}" target="_blank" rel="noopener noreferrer">{title}</a>'
+            action=f'<a class="nc-open" href="{href}" target="_blank" rel="noopener noreferrer">원문 ↗</a>'
+        else:
+            action='<span class="nc-muted">미제공</span>'
+        score=r["score"]
+        mark='<span class="nc-high">중요</span>' if score>=4 else '<span class="nc-mid">주목</span>' if score==3 else '—'
+        count=r.get("duplicates",1)-1
+        extra=f' <span class="nc-muted">+{count}</span>' if count>0 else ''
+        lines.append(f'<tr><td class="nc-time">{esc(show_time(r))}</td><td>{esc(r["category"])}</td><td>{mark}</td><td class="nc-headline">{title}{extra}</td><td>{esc(r["source"])}</td><td>{esc(related(r))}</td><td>{esc(", ".join(r["themes"]))}</td><td>{action}</td></tr>')
+    style="""<style>
+    .nc-scroll{max-height:560px;overflow:auto;border:1px solid rgba(127,145,140,.27);border-radius:9px}
+    .nc-table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px;line-height:1.45;text-align:left}
+    .nc-table th,.nc-table td{padding:8px 9px;border-bottom:1px solid rgba(127,145,140,.20);vertical-align:middle}
+    .nc-table th{position:sticky;top:0;z-index:1;background:var(--secondary-background-color,#e9f2ee);color:var(--text-color,inherit);white-space:nowrap}
+    .nc-table td:not(.nc-headline){white-space:nowrap}
+    .nc-table td.nc-headline{min-width:240px;width:100%;white-space:normal;overflow-wrap:anywhere}
+    .nc-table tr:hover td{background:rgba(0,136,120,.07)}
+    .nc-table a.nc-title{color:#008878;text-decoration:none;font-weight:650;cursor:pointer}
+    .nc-table a.nc-title:hover,.nc-table a.nc-open:hover{text-decoration:underline}
+    .nc-table a:focus-visible{outline:2px solid #008878;outline-offset:2px}
+    .nc-table a.nc-open{font-size:12px;white-space:nowrap;color:#008878;text-decoration:none}
+    .nc-high{color:#c83d38;font-weight:700}.nc-mid{color:#b67713;font-weight:650}
+    .nc-muted{opacity:.65;font-size:11px}.nc-time{font-variant-numeric:tabular-nums}
+    </style>"""
+    headers=["발행(KST)","분류","중요","제목 (클릭하여 열기)","출처","관련 종목","테마","원문"]
+    heading="".join(f'<th scope="col">{esc(h)}</th>' for h in headers)
+    st.markdown(style+'<div class="nc-scroll"><table class="nc-table"><thead><tr>'+heading+'</tr></thead><tbody>'+"".join(lines)+'</tbody></table></div>',unsafe_allow_html=True)
 
 st.title("📰 실시간 뉴스센터")
-st.caption("HanaV Insight NEWS CENTER V2.1 · 제목 기반 정보 탐지 · HTS 전용 속보망과 동일한 속도/범위는 아님")
+st.caption("HanaV Insight NEWS CENTER V2.1.1 · 제목 기반 정보 탐지 · HTS 전용 속보망과 동일한 속도/범위는 아님")
 key=setting("DART_API_KEY")
 licensed=setting("NEWS_LICENSED_RSS_JSON")
 bot=setting("NEWS_TELEGRAM_BOT_TOKEN") or setting("RADAR_TELEGRAM_BOT_TOKEN")
@@ -133,10 +171,11 @@ def render():
     bad=[name for name,ok,_ in status if not ok]
     if bad: st.warning("미수신/미설정: "+", ".join(bad))
     tabs=st.tabs(["전체 뉴스 피드","30분 테마 동향","공시","중요 시그널","데이터 상태"])
-    config={"원문":st.column_config.LinkColumn("원문",display_text="열기"),"제목":st.column_config.TextColumn("제목",width="large")}
     def table(data):
         if not data: st.info("조건에 맞는 항목이 없습니다.")
-        else: st.dataframe(frame(data[:500]),hide_index=True,use_container_width=True,height=560,column_config=config)
+        else:
+            st.caption("기사·공시 제목을 클릭하면 원문이 새 탭에서 열립니다.")
+            news_table(data[:500])
         if len(data)>500: st.caption("최신순 500개 표시 · 검색 조건으로 범위를 좁힐 수 있습니다.")
     with tabs[0]:
         st.caption(f"검색 결과 {len(selected)}건 · 유사 제목은 묶음 수로 표시")
