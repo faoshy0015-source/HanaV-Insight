@@ -12,6 +12,7 @@ st.set_page_config(page_title="HanaV Insight",page_icon="📊",layout="wide",
 # /analyze, /etf, etc., and causes "Page not found" after a deployment.
 pages=[
     st.Page("pages/2_시장_대시보드.py",title="시장 대시보드",icon="📊",default=True),
+    st.Page("pages/4_뉴스센터.py",title="실시간 뉴스센터",icon="📰",url_path="news-center"),
     st.Page("etf_finder.py",title="ETF Finder",icon="📈",url_path="etf"),
     st.Page("stock_analyze.py",title="Analyze",icon="🔎",url_path="analyze"),
     st.Page("pages/0_전종목_수급_레이더.py",title="전종목 수급 레이더",icon="📡",url_path="flow-radar"),
@@ -123,6 +124,7 @@ with st.sidebar:
 with st.sidebar:
     for path,title,icon in (
         ("pages/2_시장_대시보드.py","시장 대시보드","📊"),
+        ("pages/4_뉴스센터.py","실시간 뉴스센터","📰"),
         ("etf_finder.py","ETF Finder","📈"),
         ("stock_analyze.py","Analyze","🔎"),
         ("pages/0_전종목_수급_레이더.py","전종목 수급 레이더","📡"),
