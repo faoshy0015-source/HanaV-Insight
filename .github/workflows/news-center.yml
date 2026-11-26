@@ -1,0 +1,54 @@
+name: News Center V2.1
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - news_center_engine.py
+      - pages/4_뉴스센터.py
+      - test_news_center.py
+      - .github/workflows/news-center.yml
+  schedule:
+    - cron: '*/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: hanav-news-center
+  cancel-in-progress: false
+jobs:
+  check:
+    if: github.event_name != 'schedule' || vars.NEWS_ALERTS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install 'requests>=2.31,<3' 'feedparser>=6.0.11,<7'
+      - run: python -m py_compile app.py news_center_engine.py pages/4_뉴스센터.py
+      - run: python -m unittest test_news_center -v
+      - name: Restore alert state
+        if: vars.NEWS_ALERTS_ENABLED == 'true' && github.event_name != 'push'
+        uses: actions/cache/restore@v4
+        with:
+          path: .news-state.json
+          key: news-v21-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            news-v21-
+      - name: Poll official sources and send new alerts
+        if: vars.NEWS_ALERTS_ENABLED == 'true' && github.event_name != 'push'
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          NEWS_TELEGRAM_BOT_TOKEN: ${{ secrets.NEWS_TELEGRAM_BOT_TOKEN }}
+          NEWS_TELEGRAM_CHAT_ID: ${{ secrets.NEWS_TELEGRAM_CHAT_ID }}
+          RADAR_TELEGRAM_BOT_TOKEN: ${{ secrets.RADAR_TELEGRAM_BOT_TOKEN }}
+          RADAR_TELEGRAM_CHAT_ID: ${{ secrets.RADAR_TELEGRAM_CHAT_ID }}
+          NEWS_LICENSED_RSS_JSON: ${{ secrets.NEWS_LICENSED_RSS_JSON }}
+          NEWS_WATCH: ${{ vars.NEWS_WATCH }}
+        run: python news_center_engine.py
+      - name: Save delivery IDs
+        if: vars.NEWS_ALERTS_ENABLED == 'true' && github.event_name != 'push' && hashFiles('.news-state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .news-state.json
+          key: news-v21-${{ github.run_id }}-${{ github.run_attempt }}
