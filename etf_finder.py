@@ -3623,8 +3623,12 @@ def _render_sector_momentum():
                         key='sector_momentum_detail_'+('kr' if market=='🇰🇷 국내' else 'us'))
     detail=(instruments.loc[instruments['업종']==chosen]
             .sort_values('등락률(%)',ascending=False).reset_index(drop=True))
-    candidates=int(sum(1 for v in proxies if v[0]==chosen)) if market=='🇰🇷 국내' else int(
-        sum(1 for v in _US_SECTOR_PROXIES if v[0]==chosen))
+    if market=='🇰🇷 국내':
+        # Count all selected candidates, including ETFs with missing quotes.
+        candidate_rows=full_pulse['summary'].loc[full_pulse['summary']['업종']==chosen,'ETF수']
+        candidates=int(candidate_rows.iloc[0]) if not candidate_rows.empty else int(detail['티커'].nunique())
+    else:
+        candidates=len({v[1] for v in _US_SECTOR_PROXIES if v[0]==chosen})
     st.caption(f'{chosen} · 시세 확인 {len(detail)}개 / 대상 {candidates}개 ETF · '
                '등락률 높은 순 · 아래 표는 개별 ETF의 실제 시세')
     if len(detail)<candidates:
