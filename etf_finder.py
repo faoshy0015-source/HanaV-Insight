@@ -3465,6 +3465,7 @@ def _render_sector_momentum():
     if instruments.empty:
         st.warning('업종별 시세를 조회하지 못했습니다. '
                    +str(result.get('error') or '데이터 제공처 연결 상태를 확인하세요.'))
+        _render_etf_rising_rank()
         return
 
     # Equal-weight mean: each ETF counts once within its theme.
@@ -3501,6 +3502,9 @@ def _render_sector_momentum():
                '장중 지연 시세 또는 최근 거래일 시세가 포함될 수 있습니다.')
     if result.get('error'):
         st.caption('데이터 참고: '+str(result['error']))
+
+    # Keep the ETF ranking immediately above the heatmap instructions.
+    _render_etf_rising_rank()
 
     # Broadcast-style sector heatmap (green: gains, red: losses).
     # Tile area tracks absolute sector return (positive and negative equally).
@@ -3803,7 +3807,6 @@ def _render_etf_rising_rank():
 
 
 _render_sector_momentum()
-_render_etf_rising_rank()
 
 
 with st.container(key='db_summary_cards'):
