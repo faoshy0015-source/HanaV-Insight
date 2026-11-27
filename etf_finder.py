@@ -652,8 +652,18 @@ def _normalize_etf_identifier(value):
 
 
 def _is_krx_etf_identifier(value):
-    s=str(value or '').strip()
-    return s.isdigit()
+    s=_normalize_etf_identifier(value)
+    # KRX short codes can include letters (e.g. 0219B0, 0000Z0).
+    # Explicit listing-market metadata and the local master take precedence.
+    if re.fullmatch(r'[0-9][0-9A-Z]{5}',s):
+        return True
+    if s and db_available():
+        try:
+            with _db_connect() as conn:
+                return conn.execute("SELECT 1 FROM etf_master WHERE etf_code=? LIMIT 1",(s,)).fetchone() is not None
+        except Exception:
+            pass
+    return False
 
 
 def _us_catalog_rows():
@@ -1991,8 +2001,8 @@ def reverse_search_etf_db(query_text,min_weight=0.0,require_all=True):
         for raw in targets:
             key=normalize_stock_query(raw)
 
-            if key.isdigit():
-                code=key.zfill(6)
+            if key.isdigit() or re.fullmatch(r'[0-9][0-9a-z]{5}',key):
+                code=_normalize_etf_identifier(key)
                 z=pd.read_sql_query(
                     '''
                     SELECT etf_code,holding_code,holding_name,weight,as_of,source
@@ -2548,10 +2558,11 @@ def get_etf_price_history(etf_code,period_label):
             'source':'','error':' / '.join(errors)}
 
 
-def _set_selected_etf(etf_code,etf_name='',source=''):
+def _set_selected_etf(etf_code,etf_name='',source='',listing_market=''):
     st.session_state['selected_etf_code']=_normalize_etf_identifier(etf_code)
     st.session_state['selected_etf_name']=str(etf_name or '')
     st.session_state['selected_etf_source']=str(source or '')
+    st.session_state['selected_etf_market']=str(listing_market or '')
 
 
 
@@ -2836,10 +2847,13 @@ def _prepare_holdings_for_detail(code,etf_name,local_holdings):
     return local_holdings.copy(),'KRX PDF · 해외종목 비중 미제공','',True
 
 def render_etf_detail(etf_code,key_prefix='detail'):
-    if not _is_krx_etf_identifier(etf_code):
-        return render_us_etf_detail(etf_code,key_prefix=key_prefix)
+    code=_normalize_etf_identifier(etf_code)
+    market=''
+    if st.session_state.get('selected_etf_code')==code:
+        market=st.session_state.get('selected_etf_market','')
+    if market in ('미국','US') or (market!='KRX' and not _is_krx_etf_identifier(code)):
+        return render_us_etf_detail(code,key_prefix=key_prefix)
 
-    code=str(etf_code).zfill(6)
     master_row=get_etf_master_local(code,db_token())
     local_holdings=get_etf_holdings_local(code,db_token())
 
@@ -3208,7 +3222,7 @@ def _sector_kr_representatives(master_frame):
         return []
     source=master_frame[['etf_code','etf_name']].dropna().copy()
     source['etf_code']=source['etf_code'].astype(str).str.strip().str.zfill(6)
-    source=source[source['etf_code'].str.fullmatch(r'\d{6}')].drop_duplicates('etf_code')
+    source=source[source['etf_code'].str.fullmatch(r'[0-9A-Z]{6}',na=False)].drop_duplicates('etf_code')
     source['etf_name']=source['etf_name'].astype(str)
     excluded=r'인버스|레버리지|커버드콜|2X|3X|선물|채권|단기채|금리|머니마켓'
     source=source[~source['etf_name'].str.contains(excluded,case=False,regex=True,na=False)]
@@ -3882,7 +3896,7 @@ if isinstance(_direct_result,pd.DataFrame) and _direct_last:
             if 0<=_idx<len(_direct_show):
                 _row=_direct_show.iloc[_idx]
                 _set_selected_etf(
-                    _row.get('ETF코드/티커',''),_row.get('ETF명',''),'direct'
+                    _row.get('ETF코드/티커',''),_row.get('ETF명',''),'direct',_row.get('상장시장','')
                 )
         if (
             st.session_state.get('selected_etf_code')
@@ -4068,7 +4082,7 @@ with right:
                         _set_selected_etf(
                             _row.get('ETF코드/티커',''),
                             _row.get('ETF명',''),
-                            'theme'
+                            'theme',_row.get('상장시장','')
                         )
 
                 st.caption(
@@ -4173,7 +4187,7 @@ with a:
                     _set_selected_etf(
                         _row.get('ETF코드',''),
                         _row.get('ETF명',''),
-                        'reverse'
+                        'reverse','KRX'
                     )
 
             if (
@@ -4452,7 +4466,7 @@ with _domestic_tab:
             if 0<=_kr_top30_idx<len(_turnover_rank):
                 _kr_top30_row=_turnover_rank.iloc[_kr_top30_idx]
                 _set_selected_etf(
-                    _kr_top30_row['ETF코드'],_kr_top30_row['ETF명'],'turnover_top30_kr'
+                    _kr_top30_row['ETF코드'],_kr_top30_row['ETF명'],'turnover_top30_kr','KRX'
                 )
                 render_etf_detail(
                     st.session_state['selected_etf_code'],
@@ -4507,7 +4521,7 @@ with _us_tab:
             if 0<=_us_top30_idx<len(_us_rank_result['rows']):
                 _us_top30_row=_us_rank_result['rows'].iloc[_us_top30_idx]
                 _set_selected_etf(
-                    _us_top30_row['티커'],_us_top30_row['ETF명'],'turnover_top30_us'
+                    _us_top30_row['티커'],_us_top30_row['ETF명'],'turnover_top30_us','미국'
                 )
                 render_etf_detail(
                     st.session_state['selected_etf_code'],
