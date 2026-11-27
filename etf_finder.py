@@ -26,6 +26,12 @@ st.markdown('''
 }
 .stApp,[data-testid="stAppViewContainer"]{background:#F4F8F7;color:#203D35}
 .block-container{max-width:1500px;padding-top:1rem}
+.st-key-full_width_theme_detail,.st-key-full_width_reverse_detail{width:100%;min-width:0}
+.st-key-full_width_theme_detail [data-testid="stMetricValue"],
+.st-key-full_width_reverse_detail [data-testid="stMetricValue"]{font-size:clamp(17px,2vw,27px)!important}
+.st-key-full_width_theme_detail [data-testid="stMetricValue"] > div,
+.st-key-full_width_reverse_detail [data-testid="stMetricValue"] > div{overflow-wrap:anywhere;white-space:normal!important}
+
 header[data-testid="stHeader"]{background:#F4F8F7}
 .hero{background:linear-gradient(105deg,#005B51 0%,#008878 65%,#DCEFE6 100%);border:1px solid #B8D6CA;border-left:6px solid #008878;padding:18px 22px;border-radius:10px;margin-bottom:14px;box-shadow:0 2px 8px rgba(20,65,47,.06)}
 .hero h1{margin:0;color:white!important;font-size:30px}.hero p{margin:6px 0 0;color:#E5F3EE!important}
@@ -978,7 +984,7 @@ def render_us_etf_detail(ticker,key_prefix='us_detail'):
     info_cols[2].metric('운용사',str(meta.get('issuer') or '-')[:22])
     info_cols[3].metric('추종지수',str(meta.get('index') or '-')[:28])
 
-    chart_col,holding_col=st.columns([1.35,1],gap='large')
+    chart_col,holding_col=st.columns([1.2,1],gap='medium')
     with chart_col:
         st.markdown('#### 가격 차트')
         period=st.radio(
@@ -1032,8 +1038,8 @@ def render_us_etf_detail(ticker,key_prefix='us_detail'):
                 top=hd.head(10).copy()
                 st.altair_chart(
                     alt.Chart(top).mark_bar(color='#008878').encode(
-                        x=alt.X('구성종목:N',sort='-y',title='구성종목'),
-                        y=alt.Y('비중(%):Q',title='편입비중 (%)'),
+                        x=alt.X('비중(%):Q',title='편입비중 (%)',axis=alt.Axis(format='.1f')),
+                        y=alt.Y('구성종목:N',sort='-x',title=None,axis=alt.Axis(labelLimit=150)),
                         tooltip=['종목코드','구성종목',alt.Tooltip('비중(%):Q',format='.2f')]
                     ).properties(height=300,background='white').configure_axis(
                         labelColor='#536F64',titleColor='#203D35',gridColor='#E1EBE6'
@@ -2871,7 +2877,7 @@ def render_etf_detail(etf_code,key_prefix='detail'):
 
     st.markdown('---')
     st.subheader(f'📈 {etf_name} · {code}')
-    st.caption('선택한 ETF의 가격차트와 로컬 DB 구성종목입니다.')
+    st.caption('선택한 ETF의 가격차트와 로컬 DB 구성종목입니다. · 전체 너비 상세조회')
 
     basis_date='-'
     if fallback_basis_date:
@@ -2891,7 +2897,7 @@ def render_etf_detail(etf_code,key_prefix='detail'):
     info_cols[2].metric('구성 기준일',basis_date)
     info_cols[3].metric('추종지수',str(master_row.get('index_name') or '-')[:28])
 
-    chart_col,holding_col=st.columns([1.35,1],gap='large')
+    chart_col,holding_col=st.columns([1.2,1],gap='medium')
 
     with chart_col:
         st.markdown('#### 가격 차트')
@@ -2989,8 +2995,8 @@ def render_etf_detail(etf_code,key_prefix='detail'):
                 if not chart_top.empty:
                     st.altair_chart(
                         alt.Chart(chart_top).mark_bar(color='#008878').encode(
-                            x=alt.X('holding_name:N', sort='-y', title='구성종목'),
-                            y=alt.Y('weight:Q', title='편입비중 (%)'),
+                            x=alt.X('weight:Q', title='편입비중 (%)',axis=alt.Axis(format='.1f')),
+                            y=alt.Y('holding_name:N',sort='-x',title=None,axis=alt.Axis(labelLimit=150)),
                             tooltip=[alt.Tooltip('holding_name:N', title='구성종목'),
                                      alt.Tooltip('weight:Q', title='비중 (%)', format='.2f')]
                         ).properties(height=300, background='white').configure_axis(
@@ -4090,14 +4096,15 @@ with right:
                     '미국상장 ETF는 대표 상품의 검증된 테마 분류를 사용합니다. 투자성과 점수가 아닙니다.'
                 )
 
-                if (
-                    st.session_state.get('selected_etf_code')
-                    and st.session_state.get('selected_etf_source')=='theme'
-                ):
-                    render_etf_detail(
-                        st.session_state['selected_etf_code'],
-                        key_prefix='theme_detail'
-                    )
+# Render outside the two-column filter/results layout.
+if (st.session_state.get('selected_etf_code')
+        and st.session_state.get('selected_etf_source')=='theme'
+        and st.session_state.get('tree_search_requested')
+        and isinstance(locals().get('q'),pd.DataFrame)
+        and not q.empty
+        and st.session_state['selected_etf_code'] in q['etf_code'].astype(str).tolist()):
+    with st.container(key='full_width_theme_detail'):
+        render_etf_detail(st.session_state['selected_etf_code'],key_prefix='theme_detail')
 
 st.divider()
 
@@ -4190,15 +4197,6 @@ with a:
                         'reverse','KRX'
                     )
 
-            if (
-                st.session_state.get('selected_etf_code')
-                and st.session_state.get('selected_etf_source')=='reverse'
-            ):
-                render_etf_detail(
-                    st.session_state['selected_etf_code'],
-                    key_prefix='reverse_detail'
-                )
-
 with b:
     st.markdown('<div class="hv-section-title"><h3>⚡ 검색 구조</h3></div>', unsafe_allow_html=True)
     st.markdown('''
@@ -4209,6 +4207,14 @@ with b:
 - **검색할 때마다 1,000개 이상 ETF를 재수집하지 않음**\n- **검색 결과 행 클릭:** 가격차트 + 구성종목 표시
 ''')
     st.caption(f'로컬 DB: {DB_FILE.name} · 앱 실행 시각: {datetime.now():%Y-%m-%d %H:%M:%S}')
+
+# Render outside the narrow reverse-search form column.
+if (st.session_state.get('selected_etf_code')
+        and st.session_state.get('selected_etf_source')=='reverse'
+        and isinstance(result,pd.DataFrame) and not result.empty
+        and st.session_state['selected_etf_code'] in result['etf_code'].astype(str).tolist()):
+    with st.container(key='full_width_reverse_detail'):
+        render_etf_detail(st.session_state['selected_etf_code'],key_prefix='reverse_detail')
 
 st.divider()
 
