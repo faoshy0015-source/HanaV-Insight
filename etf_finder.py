@@ -3706,7 +3706,104 @@ def _render_sector_momentum():
                  })
 
 
+@st.cache_data(ttl=120,show_spinner=False)
+def _domestic_etf_rising_snapshot():
+    """All KRX ETF rows returned by Naver's ETF listing, not sector proxies."""
+    columns=['ETF코드','ETF명','상승률(%)','현재가(원)','거래량(주)','거래대금(억원)']
+    try:
+        response=requests.get('https://finance.naver.com/api/sise/etfItemList.nhn',
+            headers={'User-Agent':'Mozilla/5.0','Referer':'https://finance.naver.com/sise/etf.naver',
+                     'Accept':'application/json, text/plain, */*'},
+            timeout=(4,12))
+        response.raise_for_status()
+        items=response.json().get('result',{}).get('etfItemList',[])
+        if not isinstance(items,list) or not items:
+            raise ValueError('ETF 목록 응답 없음')
+        records=[]
+        total_codes=set()
+        for item in items:
+            if not isinstance(item,dict): continue
+            code=str(item.get('itemcode') or '').strip().upper()
+            name=str(item.get('itemname') or '').strip()
+            if not re.fullmatch(r'[0-9A-Z]{6}',code) or not name: continue
+            total_codes.add(code)
+            price=_sector_number(item.get('nowVal'))
+            change=_sector_number(item.get('changeRate'))
+            sign=str(item.get('risefall') or '')
+            if not pd.notna(price) or price<=0 or not pd.notna(change): continue
+            if sign in ('1','2'): change=abs(change)
+            elif sign in ('4','5'): change=-abs(change)
+            elif sign=='3': 
+                if change!=0: continue
+            else: continue
+            volume=_sector_number(item.get('quant'))
+            amount=_sector_number(item.get('amonut'))
+            records.append({'ETF코드':code,'ETF명':name,'상승률(%)':round(change,2),
+                '현재가(원)':price,'거래량(주)':volume if pd.notna(volume) and volume>=0 else float('nan'),
+                '거래대금(억원)':amount/100 if pd.notna(amount) and amount>=0 else float('nan')})
+        frame=pd.DataFrame(records,columns=columns).drop_duplicates('ETF코드')
+        if frame.empty:
+            raise ValueError('유효 ETF 시세 없음')
+        fetched=datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S')
+        return frame,len(total_codes),fetched,''
+    except Exception as exc:
+        return pd.DataFrame(columns=columns),0,'',f'{type(exc).__name__}: ETF 목록 시세 조회 실패'
+
+
+def _render_etf_rising_rank():
+    st.markdown('<div class="hv-section-title"><h3>🔥 ETF 상승률 TOP 30</h3></div>',unsafe_allow_html=True)
+    st.caption('국내(KRX) 상장 ETF · 네이버 금융 전체 ETF 목록 응답 기준 · 전일 종가 대비 상승률순 · 해외자산에 투자하는 국내상장 ETF 포함')
+    c1,c2=st.columns([3,1])
+    with c1:
+        scope=st.radio('상품 범위',['전체 ETF','레버리지·인버스 제외'],horizontal=True,
+            key='etf_rise_scope',label_visibility='collapsed')
+    with c2:
+        if st.button('🔄 순위 새로고침',key='etf_rising_refresh',use_container_width=True):
+            _domestic_etf_rising_snapshot.clear()
+    with st.spinner('국내 ETF 전체 시세 조회 중...'):
+        frame,total,fetched,error=_domestic_etf_rising_snapshot()
+    if error:
+        st.warning(error+' · 업종별 모멘텀 및 기존 검색 기능은 계속 사용할 수 있습니다.')
+        return
+    eligible=frame
+    if scope=='레버리지·인버스 제외':
+        eligible=frame[~frame['ETF명'].str.contains(r'레버리지|인버스|2X|3X',case=False,regex=True,na=False)]
+    ranked=eligible[eligible['상승률(%)']>0].sort_values(
+        ['상승률(%)','거래량(주)','ETF코드'],ascending=[False,False,True],na_position='last').head(30).reset_index(drop=True)
+    st.caption(f'조회 {fetched} KST · 목록 {total:,}개 / 시세 확인 {len(frame):,}개 / 필터 대상 {len(eligible):,}개 · 2분 캐시 · 시세 지연 또는 최근 거래일 값일 수 있음')
+    if len(frame)<total:
+        st.warning('일부 ETF 시세가 누락되었습니다. 확인된 종목 내 순위입니다.')
+    if ranked.empty:
+        st.info('조회 범위에 상승 ETF가 없습니다.')
+        return
+    ranked.insert(0,'순위',range(1,len(ranked)+1))
+    st.caption('ETF 행을 클릭하면 바로 아래에 가격 차트와 구성종목이 표시됩니다.')
+    view=ranked[['순위','ETF명','ETF코드','상승률(%)','현재가(원)','거래량(주)','거래대금(억원)']]
+    # Tie the selection to the ordered identifiers to avoid incorrect selection on refresh.
+    order_key=_db_hashlib.sha256('|'.join(view['ETF코드']).encode()).hexdigest()[:16]
+    styled=view.style.apply(lambda col: ['color:#c83d38;font-weight:700']*len(col),subset=['상승률(%)'])
+    event=st.dataframe(styled,use_container_width=True,hide_index=True,height=560,
+        on_select='rerun',selection_mode='single-row',key='etf_rise_'+scope+'_'+order_key,
+        column_config={'순위':st.column_config.NumberColumn(width='small',format='%d'),
+            'ETF명':st.column_config.TextColumn(width='large'),
+            'ETF코드':st.column_config.TextColumn(width='small'),
+            '상승률(%)':st.column_config.NumberColumn(format='%+.2f%%'),
+            '현재가(원)':st.column_config.NumberColumn(format='%d'),
+            '거래량(주)':st.column_config.NumberColumn(format='%d'),
+            '거래대금(억원)':st.column_config.NumberColumn(format='%.2f')})
+    try:
+        picked=list(event.selection.rows)
+    except (TypeError,AttributeError,KeyError):
+        picked=[]
+    if picked and 0<=picked[0]<len(ranked):
+        selected=ranked.iloc[picked[0]]
+        _set_selected_etf(selected['ETF코드'],selected['ETF명'],'etf_rising_rank','KRX')
+        with st.container(key='etf_rising_full_detail'):
+            render_etf_detail(selected['ETF코드'],key_prefix='etf_rising_detail')
+
+
 _render_sector_momentum()
+_render_etf_rising_rank()
 
 
 with st.container(key='db_summary_cards'):
