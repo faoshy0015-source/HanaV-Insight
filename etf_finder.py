@@ -4113,102 +4113,137 @@ st.divider()
 # REVERSE STOCK SEARCH - LOCAL DB ONLY
 # =========================================================
 
-a,b=st.columns([1,1.25],gap='large')
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_reverse_liquidity(today_kst):
+    """Retrieve the most recent completed KRX ETF session before today (KST)."""
+    try:
+        krx_stock,_mode=_import_pykrx()
+    except Exception as exc:
+        return {'as_of': '', 'rows': pd.DataFrame(),
+                'error': f'KRX 연결 설정 확인 필요 ({type(exc).__name__})'}
 
-with a:
-    st.markdown('<div class="hv-section-title"><h3>🔍 종목으로 ETF 찾기</h3></div>', unsafe_allow_html=True)
-    st.caption('편입종목 역검색은 현재 국내상장(KRX) ETF 로컬 DB를 대상으로 합니다.')
+    last_calendar_day=datetime.strptime(today_kst,'%Y-%m-%d').date()-timedelta(days=1)
+    last_error=''
+    for days_back in range(12):
+        session=last_calendar_day-timedelta(days=days_back)
+        if session.weekday()>=5:
+            continue
+        try:
+            values=krx_stock.get_etf_ohlcv_by_ticker(session.strftime('%Y%m%d'))
+        except Exception as exc:
+            last_error=f'KRX 응답 오류 ({type(exc).__name__})'
+            continue
+        if values is None or values.empty:
+            continue
+        if not {'거래대금','종가','거래량'}.issubset(values.columns):
+            last_error='KRX 응답 필드가 예상과 다릅니다.'
+            continue
 
-    names=st.text_input(
-        '종목명 / 종목코드',
-        placeholder='예: SK하이닉스 또는 000660 · 복수검색: 삼성전자, SK하이닉스'
-    )
+        daily=values.reset_index()
+        ticker_col='티커' if '티커' in daily.columns else daily.columns[0]
+        daily['ETF코드']=daily[ticker_col].astype(str).str.strip().str.upper().str.zfill(6)
+        daily=daily[daily['ETF코드'].str.fullmatch(r'[0-9A-Z]{6}',na=False)].copy()
+        for col in ('거래대금','종가','거래량'):
+            daily[col]=pd.to_numeric(daily[col],errors='coerce')
+        daily=daily[(daily['종가']>0)&(daily['거래대금']>=0)&(daily['거래량']>=0)]
+        daily=daily.drop_duplicates('ETF코드',keep='first')
+        if (daily['거래대금']>0).sum()<30:
+            last_error='KRX 전종목 응답의 유효 ETF가 30개 미만입니다.'
+            continue
 
-    c1,c2=st.columns(2)
-    with c1:
-        min_weight=st.number_input(
-            '최소 합산 편입비중 (%)',
-            min_value=0.0,max_value=100.0,value=0.0,step=0.5
-        )
-    with c2:
+        top=daily[['ETF코드','종가','거래량','거래대금']]
+        return {'as_of':session.strftime('%Y-%m-%d'),
+                'rows':top.reset_index(drop=True),'error':''}
+
+    return {'as_of':'','rows':pd.DataFrame(),
+            'error':last_error or '최근 거래일의 KRX ETF 시세를 조회하지 못했습니다.'}
+
+
+
+st.markdown('<div class="hv-section-title"><h3>🔍 종목으로 ETF 찾기</h3></div>', unsafe_allow_html=True)
+st.caption('편입종목은 국내상장 ETF 로컬 DB에서 검색하고, 거래량·거래대금은 최근 완료된 KRX 거래일 시세로 비교합니다.')
+with st.form('reverse_search_full_width'):
+    rc1,rc2,rc3=st.columns([2,1,1.15])
+    with rc1:
+        names=st.text_input('종목명 / 종목코드',placeholder='예: SK하이닉스 또는 000660 · 복수검색: 삼성전자, SK하이닉스')
+    with rc2:
+        min_weight=st.number_input('최소 합산 편입비중 (%)',min_value=0.0,max_value=100.0,value=0.0,step=0.5)
+    with rc3:
         match_mode=st.selectbox('복수 종목 조건',['모두 포함','하나 이상 포함'])
+    reverse_clicked=st.form_submit_button('ETF 역검색',type='primary',use_container_width=True)
+if reverse_clicked:
+    st.session_state['_reverse_search_revision']=st.session_state.get('_reverse_search_revision',0)+1
+    if st.session_state.get('selected_etf_source')=='reverse':
+        for k in ('selected_etf_code','selected_etf_name','selected_etf_source','selected_etf_market'):
+            st.session_state.pop(k,None)
+    if not db_available():
+        st.warning('로컬 ETF DB가 없습니다. 최초 1회 DB 업데이트가 필요합니다.')
+        st.session_state.pop('reverse_search_result',None)
+    else:
+        with st.spinner('로컬 DB 검색 중...'):
+            st.session_state['reverse_search_result']=reverse_search_etf_db(
+                names,min_weight=min_weight,require_all=(match_mode=='모두 포함'))
+result=st.session_state.get('reverse_search_result')
 
-    if st.button('ETF 역검색',type='primary',use_container_width=True):
-        if not db_available():
-            st.warning('로컬 ETF DB가 없습니다. 최초 1회 DB 업데이트가 필요합니다.')
-            st.session_state.pop('reverse_search_result',None)
+if isinstance(result,pd.DataFrame):
+    if result.empty:
+        st.info('조건에 맞는 ETF를 찾지 못했습니다. 종목명/코드 또는 최소 편입비중을 확인해 주세요.')
+    else:
+        show=result.rename(columns={'etf_name':'ETF명','etf_code':'ETF코드',
+            'match_weight':'합산 편입비중(%)','matched_stocks':'일치 종목','as_of':'구성 기준일'})
+        today_kst=datetime.now(timezone(timedelta(hours=9))).strftime('%Y-%m-%d')
+        sa,sb=st.columns([3,1])
+        with sa:
+            sort_options=['편입비중 높은 순','거래량 많은 순','거래대금 높은 순']
+            sort_choice=st.radio('정렬 기준',sort_options,horizontal=True,key='reverse_liquidity_sort')
+        with sb:
+            if st.button('거래량 새로고침',key='reverse_liquidity_refresh',use_container_width=True):
+                _fetch_reverse_liquidity.clear()
+                st.session_state['_reverse_search_revision']=st.session_state.get('_reverse_search_revision',0)+1
+        with st.spinner('최근 완료 거래일 ETF 거래량 조회 중...'):
+            liquidity=_fetch_reverse_liquidity(today_kst)
+        daily=liquidity['rows']
+        if not daily.empty:
+            daily=daily.rename(columns={'거래량':'거래량(주)','거래대금':'거래대금(원)'})
+            daily['거래대금(억원)']=daily['거래대금(원)']/100000000
+            show['ETF코드']=show['ETF코드'].astype(str).str.upper().str.zfill(6)
+            show=show.merge(daily[['ETF코드','거래량(주)','거래대금(억원)']],on='ETF코드',how='left',validate='many_to_one')
         else:
-            with st.spinner('로컬 DB 검색 중...'):
-                result=reverse_search_etf_db(
-                    names,
-                    min_weight=min_weight,
-                    require_all=(match_mode=='모두 포함')
-                )
-            st.session_state['reverse_search_result']=result
-
-    result=st.session_state.get('reverse_search_result')
-
-    if isinstance(result,pd.DataFrame):
-        if result.empty:
-            st.info('조건에 맞는 ETF를 찾지 못했습니다. 종목명/코드 또는 최소 편입비중을 확인해 주세요.')
+            show['거래량(주)']=float('nan')
+            show['거래대금(억원)']=float('nan')
+        sort_cols={'편입비중 높은 순':['합산 편입비중(%)','거래대금(억원)'],
+                   '거래량 많은 순':['거래량(주)','거래대금(억원)','합산 편입비중(%)'],
+                   '거래대금 높은 순':['거래대금(억원)','거래량(주)','합산 편입비중(%)']}[sort_choice]
+        show=show.sort_values(sort_cols,ascending=False,na_position='last',kind='stable').reset_index(drop=True)
+        columns=['ETF명','ETF코드','합산 편입비중(%)','거래량(주)','거래대금(억원)','일치 종목','구성 기준일']
+        show=show[[col for col in columns if col in show.columns]]
+        st.success(f'{len(show):,}개 ETF를 찾았습니다. 로컬 DB 검색 결과입니다.')
+        if liquidity['as_of']:
+            received=int(show['거래량(주)'].notna().sum())
+            st.caption(f"거래량·거래대금 기준: {liquidity['as_of']} KRX 정규장 완료 데이터 · 수신 {received:,}/{len(show):,}개 · 미수신은 공란(0과 다름)")
         else:
-            show=result.rename(columns={
-                'etf_name':'ETF명',
-                'etf_code':'ETF코드',
-                'issuer':'운용사',
-                'match_weight':'합산 편입비중(%)',
-                'matched_stocks':'일치 종목',
-                'match_count':'일치 종목수',
-                'aum':'순자산',
-                'turnover':'거래대금',
-                'fee':'총보수',
-                'index_name':'추종지수',
-                'as_of':'구성 기준일',
-                'source':'출처'
+            st.warning('거래량·거래대금 조회 실패: '+str(liquidity['error'])+' · 편입종목 검색 결과는 유지합니다.')
+        st.caption('거래대금은 ETF 가격 차이를 반영하는 거래활동 지표입니다. ETF 행을 클릭하면 아래 상세정보가 표시됩니다.')
+        table_key='reverse_search_results_full_'+str(st.session_state.get('_reverse_search_revision',0))+'_'+str(sort_options.index(sort_choice))
+        reverse_event=st.dataframe(show,use_container_width=True,hide_index=True,height=420,
+            on_select='rerun',selection_mode='single-row',key=table_key,
+            column_config={
+                'ETF명':st.column_config.TextColumn('ETF명',width='medium'),
+                'ETF코드':st.column_config.TextColumn('ETF코드',width='small'),
+                '합산 편입비중(%)':st.column_config.NumberColumn('편입비중(%)',format='%.2f%%',width='small'),
+                '거래량(주)':st.column_config.NumberColumn('거래량(주)',format='%d',width='medium'),
+                '거래대금(억원)':st.column_config.NumberColumn('거래대금(억원)',format='%.2f',width='medium')
             })
+        try:
+            reverse_rows=list(reverse_event.selection.rows)
+        except Exception:
+            reverse_rows=[]
+        if reverse_rows:
+            idx=int(reverse_rows[0])
+            if 0<=idx<len(show):
+                row=show.iloc[idx]
+                _set_selected_etf(row['ETF코드'],row['ETF명'],'reverse','KRX')
 
-            st.success(f'{len(show):,}개 ETF를 찾았습니다. 로컬 DB 검색 결과입니다.')
-            st.caption('👇 ETF 행을 클릭하면 아래에 가격차트와 구성종목이 표시됩니다.')
-
-            reverse_event=st.dataframe(
-                show,
-                use_container_width=True,
-                hide_index=True,
-                on_select='rerun',
-                selection_mode='single-row',
-                key='reverse_search_results_table',
-                column_config={
-                    '합산 편입비중(%)':st.column_config.NumberColumn(format='%.2f%%')
-                }
-            )
-
-            try:
-                reverse_rows=list(reverse_event.selection.rows)
-            except Exception:
-                reverse_rows=[]
-
-            if reverse_rows:
-                _idx=int(reverse_rows[0])
-                if 0<=_idx<len(show):
-                    _row=show.iloc[_idx]
-                    _set_selected_etf(
-                        _row.get('ETF코드',''),
-                        _row.get('ETF명',''),
-                        'reverse','KRX'
-                    )
-
-with b:
-    st.markdown('<div class="hv-section-title"><h3>⚡ 검색 구조</h3></div>', unsafe_allow_html=True)
-    st.markdown('''
-- **최초 1회 / 수동 업데이트:** KRX → 로컬 DB 저장
-- **종목 역검색:** 로컬 SQLite DB만 조회
-- **테크트리 필터:** 로컬 ETF Master만 조회
-- **Streamlit 재실행:** 저장된 DB를 다시 사용
-- **검색할 때마다 1,000개 이상 ETF를 재수집하지 않음**\n- **검색 결과 행 클릭:** 가격차트 + 구성종목 표시
-''')
-    st.caption(f'로컬 DB: {DB_FILE.name} · 앱 실행 시각: {datetime.now():%Y-%m-%d %H:%M:%S}')
-
-# Render outside the narrow reverse-search form column.
 if (st.session_state.get('selected_etf_code')
         and st.session_state.get('selected_etf_source')=='reverse'
         and isinstance(result,pd.DataFrame) and not result.empty
